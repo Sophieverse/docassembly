@@ -153,9 +153,13 @@ export function render(ast, data, options = {}) {
         if (id && id.startsWith('_')) prefix = outerPrefix ? outerPrefix + '.' + id + '[]' : id + '[]';
         else if (id && outerPrefix && !(id in (rootVars(scope) || {})) && !hasKeyCI(rootVars(scope), id.split('.')[0]) && hasKeyCI(scope.vars, id.split('.')[0])) prefix = outerPrefix + '.' + id + '[]';
         else prefix = (id || node.src) + '[]';
+        // Knackly auto-punctuates: with `|punc:"1, 2, and 3"` and no explicit {[_punc]} in the body,
+        // the separator is appended after each item automatically.
+        const autoPunc = punc && !JSON.stringify(node.body).includes('_punc');
         items.forEach((item, i) => {
           const itemScope = createScope(itemVars(item, i, items.length, node.itemName, punc), scope, prefix);
           renderBody(node.body, itemScope);
+          if (autoPunc) out.push(puncFor(punc, i, items.length));
         });
         break;
       }

@@ -417,3 +417,27 @@ details.rules[open] summary { margin-bottom: .35rem; }
 .word-banner { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; margin-bottom: .5rem; font-size: .88rem; }
 .banner-info { border: 1px solid var(--accent-soft); background: var(--accent-soft); color: var(--fg); border-radius: var(--radius); padding: .5rem .75rem; }
 .editor-textarea[readonly] { background: var(--bg-sunken); }
+
+/* ---------- small screens: keep every page inside the viewport ---------- */
+/* Grid children default to min-width:auto, so a wide child (Variables table, a document with an unbreakable
+   "______" signature line) widens the whole column past the viewport instead of shrinking. */
+.interview-layout > *, .output-layout > *, .editor-layout > *, .settings-grid > * { min-width: 0; }
+.doc { overflow-wrap: anywhere; }
+.editor-textarea { min-width: 0; }
+.help pre { overflow-x: auto; }
+.help code { overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .topbar { gap: .5rem; }
+  .topnav { flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  .topnav::-webkit-scrollbar { display: none; }
+  .topnav a { white-space: nowrap; padding: .35rem .45rem; }
+  .topbar-right { flex-shrink: 0; gap: .4rem; }
+  .table-wrap, table.list { display: block; max-width: 100%; overflow-x: auto; }
+  .table-wrap table.list { display: table; width: 100%; }
+  table.list td .actions { flex-wrap: wrap; justify-content: flex-start; }
+  table.list th:nth-child(2), table.list td:nth-child(2) { display: none; } /* description / count column */
+  .doc { padding: 1.25rem 1rem; }
+  .interview-side .doc { padding: 1rem .75rem; }
+  .sticky-actions { flex-wrap: wrap; }
+  .help table { display: block; max-width: 100%; overflow-x: auto; }
+}
