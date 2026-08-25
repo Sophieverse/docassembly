@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { samples, getSample } from '../samples/index.js';
-import { compile, assemble, questionnaire, analyze } from '../engine/index.js';
+import { compile, assemble, questionnaire, analyze, relevantVariables, createModel, mergeModel, computeDerived, validate } from '../engine/index.js';
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
@@ -68,10 +68,19 @@ function scrub(text) {
   return t;
 }
 
+/** The model the app uses for a sample: its shipped `model` merged with the template's analysis (annotations included). */
+function modelOf(s) {
+  const c = compile(s.text);
+  return s.model ? mergeModel(clone(s.model), c.analysis) : createModel(c.analysis);
+}
+
 function render(s, data, pname) {
   const c = compile(s.text);
   assert.deepEqual(c.errors, [], `${s.id}: compile errors`);
-  const { text, warnings } = assemble(s.text, data);
+  assert.deepEqual(c.analysis.annotationErrors || [], [], `${s.id}: annotation errors`);
+  const derived = computeDerived(modelOf(s), clone(data || {}));
+  assert.deepEqual(derived.errors, [], `${s.id}/${pname}: computed-field errors`);
+  const { text, warnings } = assemble(s.text, derived.data);
   const hard = warnings.filter((w) => /Error in|Unknown function|Unknown filter/i.test(w));
   assert.deepEqual(hard, [], `${s.id}/${pname}: expression errors`);
   return text;
@@ -204,6 +213,155 @@ test('will: guardianship article depends on a child being under 18 today, comput
   // and the questionnaire never asks an "Is minor?" question
   const c = compile(s.text);
   assert.ok(!questionnaire(c.ast, s.sampleAnswers, s.model).some((q) => /IsMinor/.test(q.path)));
+  assert.ok(!questionnaire(c.ast, s.sampleAnswers, modelOf(s)).some((q) => /IsMinor/.test(q.path)));
+});
+
+test('will: Children[].IsMinor is a per-item computed field in the model that drives guardianship', () => {
+  const s = getSample('last-will');
+  const def = s.model.variables['Children[].IsMinor'];
+  assert.equal(def.type, 'computed');
+  assert.match(def.formula, /yearsBetween\(DOB, today\(\)\) < 18/);
+  // the template reads IsMinor rather than repeating the date arithmetic
+  assert.ok(s.text.includes('{[if Children|any: IsMinor]}'));
+  assert.ok(!/any: yearsBetween\(DOB/.test(s.text));
+  const y = new Date().getFullYear();
+  const d = clone(s.sampleAnswers);
+  d.Children = [{ FullName: 'Adult Child', DOB: '1990-01-01' }, { FullName: 'Young Child', DOB: `${y - 3}-01-01` }];
+  const { data, errors } = computeDerived(modelOf(s), clone(d));
+  assert.deepEqual(errors, []);
+  assert.equal(data.Children[0].IsMinor, false);
+  assert.equal(data.Children[1].IsMinor, true);
+  const t = assemble(s.text, data).text;
+  assert.ok(t.includes('GUARDIAN OF MINOR'));
+  assert.ok(t.includes('Minor children as of the date of this Will: Young Child (age 3).'));
+  assert.ok(!t.includes('Adult Child (age'));
+  // flip the computed value and the article goes away — nothing else in the data changes
+  data.Children[1].IsMinor = false;
+  assert.ok(!assemble(s.text, data).text.includes('GUARDIAN OF MINOR'));
+  // a merged model still treats it as computed (never asked), and the sample's model wins over inference
+  const m = modelOf(s);
+  assert.equal(m.variables['Children[].IsMinor'].type, 'computed');
+  assert.equal(m.variables['Children[].IsMinor'].formula, def.formula);
+});
+
+// ---------------------------------------------------------------- annotations + validation
+
+/** Validation errors the interview would show: computed fields filled in, only relevant variables checked. */
+function errorsFor(s, data) {
+  const m = modelOf(s);
+  const ast = compile(s.text).ast;
+  const full = computeDerived(m, clone(data)).data;
+  return validate(m, full, { relevant: relevantVariables(ast, full).relevant }).map((e) => `${e.path}: ${e.message}`);
+}
+const errorsOn = (s, data, path) => errorsFor(s, data).filter((e) => e.startsWith(path + ':') || e.startsWith(path + '.') || e.startsWith(path + '['));
+
+test('no sample has annotation errors, and the sample answers pass every validation rule', () => {
+  for (const s of samples) {
+    const c = compile(s.text);
+    assert.deepEqual(c.analysis.annotationErrors || [], [], `${s.id}: annotation errors`);
+    assert.deepEqual(errorsFor(s, s.sampleAnswers), [], `${s.id}: sample answers must validate`);
+  }
+});
+
+test('llc: membership percentages must total 100 and each lies in 0..100', () => {
+  const s = getSample('llc-operating-agreement');
+  const m = modelOf(s);
+  assert.equal(m.variables['Members'].validate, 'sum(Members, "Percent") = 100');
+  assert.equal(m.variables['Members'].message, 'Membership percentages must total 100%');
+  assert.equal(m.variables['Members[].Percent'].min, 0);
+  assert.equal(m.variables['Members[].Percent'].max, 100);
+  assert.deepEqual(m.variables['Members'].fromTemplate, { validate: 'sum(Members, "Percent") = 100', message: 'Membership percentages must total 100%' });
+  // the hand-written label survives the annotation merge (user model edits win; annotations only add rules)
+  assert.equal(m.variables['Members[].Percent'].label, 'Percentage interest (%)');
+  const two = (a, b) => { const d = clone(s.sampleAnswers); d.Members = d.Members.slice(0, 2); d.Members[0].Percent = a; d.Members[1].Percent = b; return d; };
+  assert.deepEqual(errorsOn(s, two(60, 50), 'Members'), ['Members: Membership percentages must total 100%']);
+  assert.deepEqual(errorsOn(s, two(50, 50), 'Members'), []);
+  const errs = errorsOn(s, two(120, -20), 'Members');
+  assert.ok(errs.some((e) => e.startsWith('Members[0].Percent:') && /at most 100/.test(e)), errs.join('\n'));
+  assert.ok(errs.some((e) => e.startsWith('Members[1].Percent:') && /at least 0/.test(e)), errs.join('\n'));
+  assert.ok(!errs.some((e) => e.startsWith('Members:')), 'sum is 100, so no list-level error');
+});
+
+test('lease: end date must be after start date', () => {
+  const s = getSample('residential-lease');
+  const d = clone(s.sampleAnswers); d.LeaseStart = '2027-01-01'; d.LeaseEnd = '2026-12-31';
+  assert.deepEqual(errorsOn(s, d, 'LeaseEnd'), ['LeaseEnd: End date must be after start']);
+  d.LeaseEnd = '2027-01-01';
+  assert.deepEqual(errorsOn(s, d, 'LeaseEnd'), ['LeaseEnd: End date must be after start'], 'same day is not after');
+  d.LeaseEnd = '2027-12-31';
+  assert.deepEqual(errorsOn(s, d, 'LeaseEnd'), []);
+});
+
+test('engagement letter: hourly rate is non-negative and contingency percentage is at most 100', () => {
+  const s = getSample('engagement-letter');
+  const d = clone(s.sampleAnswers); d.HourlyRate = -5;
+  assert.match(errorsOn(s, d, 'HourlyRate').join(), /at least 0/);
+  const c = clone(s.sampleAnswers); c.FeeType = 'Contingency'; c.ContingencyPercent = 150;
+  assert.match(errorsOn(s, c, 'ContingencyPercent').join(), /at most 100/);
+  c.ContingencyPercent = 40;
+  assert.deepEqual(errorsOn(s, c, 'ContingencyPercent'), []);
+  assert.equal(modelOf(s).variables['HourlyRate'].label, 'Hourly rate of responsible attorney');
+});
+
+test('demand letter: at least one day to respond', () => {
+  const s = getSample('demand-letter');
+  const d = clone(s.sampleAnswers); d.DeadlineDays = 0;
+  assert.deepEqual(errorsOn(s, d, 'DeadlineDays'), ['DeadlineDays: Give at least one day to respond']);
+  d.DeadlineDays = 1;
+  assert.deepEqual(errorsOn(s, d, 'DeadlineDays'), []);
+});
+
+test('tutorial: labels, help, options and rules all come from @annotations in the template', () => {
+  const s = getSample('tutorial');
+  const c = compile(s.text);
+  const ann = c.analysis.annotations;
+  assert.equal(ann.get('Client.FullName').label, "Client's full legal name");
+  assert.deepEqual(ann.get('Client.Gender').options, ['Male', 'Female', 'Nonbinary']);
+  assert.equal(ann.get('Client.EntityType').help, 'Leave blank to print "business entity".');
+  const m = s.model;
+  assert.equal(m.variables['Client.Gender'].type, 'selection');
+  assert.deepEqual(m.variables['Client.Gender'].fromTemplate.options, ['Male', 'Female', 'Nonbinary']);
+  assert.equal(m.variables['Client.EntityType'].required, false);
+  assert.equal(m.variables['Fee'].type, 'currency');
+  assert.equal(m.variables['Fee'].min, 0);
+  assert.equal(m.variables['Children[].DOB'].fromTemplate.validate, 'value <= today()');
+  // every shipped label is marked "set in template"
+  for (const [p, def] of Object.entries(m.variables)) if (def.type !== 'object') assert.ok(def.fromTemplate && def.fromTemplate.label, `${p} label should come from an annotation`);
+  // questionnaire carries them through
+  const qs = questionnaire(c.ast, s.sampleAnswers, m);
+  const gender = qs.find((q) => q.path === 'Client.Gender');
+  assert.equal(gender.label, "Client's pronouns");
+  assert.deepEqual(gender.options, ['Male', 'Female', 'Nonbinary']);
+  const entity = clone(s.sampleAnswers); entity.Client.IsEntity = true;
+  assert.equal(questionnaire(c.ast, entity, m).find((q) => q.path === 'Client.EntityType').help, 'Leave blank to print "business entity".');
+  assert.equal(qs.find((q) => q.path === 'Fee').min, 0);
+  assert.equal(qs.find((q) => q.path === 'Fee').fromTemplate.min, 0);
+  // and the @validate rule fires
+  const d = clone(s.sampleAnswers); d.Children[0].DOB = `${new Date().getFullYear() + 2}-01-01`;
+  assert.deepEqual(errorsOn(s, d, 'Children[0].DOB'), ['Children[0].DOB: A date of birth cannot be in the future']);
+  d.Children[0].DOB = '2012-03-14'; d.Fee = -1;
+  assert.match(errorsOn(s, d, 'Fee').join(), /at least 0/);
+});
+
+test('annotations never conflict with a sample\'s hand-written model: merged fields agree with the shipped model', () => {
+  for (const s of samples) {
+    if (s.id === 'tutorial') continue;
+    const m = modelOf(s);
+    for (const [p, def] of Object.entries(s.model.variables)) {
+      const v = m.variables[p];
+      assert.ok(v, `${s.id}: ${p} in merged model`);
+      assert.equal(v.label, def.label, `${s.id}: ${p} label`);
+      assert.equal(v.type, def.type, `${s.id}: ${p} type`);
+      if (def.options) assert.deepEqual([...v.options].sort(), [...def.options].sort(), `${s.id}: ${p} options`);
+      if (def.help) assert.equal(v.help, def.help, `${s.id}: ${p} help`);
+      if (def.required === false) assert.equal(v.required, false, `${s.id}: ${p} required`);
+      if (def.formula) assert.equal(v.formula, def.formula, `${s.id}: ${p} formula`);
+    }
+    for (const [p, ann] of compile(s.text).analysis.annotations) {
+      const shipped = s.model.variables[p] || {};
+      for (const k of Object.keys(ann)) assert.ok(!(k in shipped), `${s.id}: ${p}.${k} is set both by @${k} and by the model`);
+    }
+  }
 });
 
 // ---------------------------------------------------------------- questionnaire

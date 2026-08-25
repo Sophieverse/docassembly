@@ -11,9 +11,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { samples, getSample } from '../samples/index.js';
 
-let compile, assemble;
+let compile, assemble, computeDerived = null, mergeModel = null;
 try {
-  ({ compile, assemble } = await import('../engine/index.js'));
+  ({ compile, assemble, computeDerived, mergeModel } = await import('../engine/index.js'));
 } catch {
   const { parse } = await import('../engine/parser.js');
   const { render } = await import('../engine/evaluate.js');
@@ -33,6 +33,8 @@ const clone = (o) => JSON.parse(JSON.stringify(o));
 function run(sample, data) {
   const c = compile(sample.text);
   assert.deepEqual(c.errors, [], `${sample.id}: compile errors`);
+  // Per-item computed fields (e.g. the will's Children[].IsMinor) are filled in by the model before rendering, as the app does.
+  if (computeDerived && mergeModel && sample.model && c.analysis) data = computeDerived(mergeModel(clone(sample.model), c.analysis), clone(data)).data;
   const { text, warnings } = assemble(sample.text, data);
   const hard = (warnings || []).filter((w) => /Error in|Unknown function|Unknown filter/i.test(w));
   assert.deepEqual(hard, [], `${sample.id}: expression errors`);

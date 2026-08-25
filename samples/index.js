@@ -6,6 +6,10 @@
  * partial engine/model.js Model ({ variables: { [path]: { label, type, options?, help?, required? } } })
  * carrying attorney-facing question labels and type/option overrides. Pass it as the third
  * argument of questionnaire() (or merge it into the template's stored model on import).
+ * Validation rules (@min/@max/@validate) live as annotations in the template text itself;
+ * the tutorial sample gets its whole model from annotations via createModel(analyze(...)).
+ * A shipped `model` and the template's annotations never set the same field: on
+ * mergeModel(), model edits win over annotations, which win over inference.
  */
 import tutorial from './tutorial.js';
 import engagementLetter from './engagement-letter.js';

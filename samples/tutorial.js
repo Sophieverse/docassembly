@@ -9,10 +9,9 @@ export const description = 'A tiny walkthrough of @annotations, fields, if/else,
 export const category = 'Tutorial';
 
 export const text = `{[# ANNOTATIONS live in comments and shape the questionnaire without leaving the template.
-   One "@key Path: value" per line. @label names a question, @help adds a hint,
-   @options turns a text field into a pick-list, @type/@required override inference,
-   @min/@max bound numbers and dates, and @validate adds a rule ("expr :: message").
-   Inside a rule, "value" is the answer being checked. ]}
+   One "@key Path: value" per line: label names a question, help adds a hint, options turns
+   a text field into a pick-list, type/required override inference, min/max bound numbers
+   and dates, and validate adds a rule written "expr :: message" where "value" is the answer. ]}
 {[# @label Client.FullName: Client's full legal name
 @label Client.IsEntity: Is the client a business entity (not an individual)?
 @label Client.EntityType: Type of entity (e.g., Delaware corporation)
