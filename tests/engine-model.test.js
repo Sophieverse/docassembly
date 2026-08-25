@@ -79,14 +79,14 @@ test('coerce', () => {
 });
 
 test('validate', () => {
-  const m = createModel(analyze(parse('{[Name]} {[Fee|currency]} {[When|format:"long"]} {[if Flag]}x{[end if]} {[if State = "CA"]}y{[end if]} {[Email]} {[list Kids]}{[Age|number]}{[end list]}')));
+  const m = createModel(analyze(parse('{[Name]} {[Fee|currency]} {[When|format:"long"]} {[if Flag]}x{[end if]} {[if State = "CA" or State = "NY"]}y{[end if]} {[Email]} {[list Kids]}{[Age|number]}{[end list]}')));
   const errs = validate(m, { Name: '', Fee: 'lots', When: 'yesterday', Flag: 'x', State: 'TX', Email: 'nope', Kids: [{ Age: 3 }, { Age: 'old' }, {}] });
   const byPath = Object.fromEntries(errs.map((e) => [e.path, e.message]));
   assert.match(byPath['Name'], /required/);
   assert.match(byPath['Fee'], /number/);
   assert.match(byPath['When'], /valid date/);
   assert.match(byPath['Flag'], /Yes or No/);
-  assert.match(byPath['State'], /one of: CA/);
+  assert.match(byPath['State'], /one of: CA, NY/);
   assert.match(byPath['Email'], /email/);
   assert.match(byPath['Kids[1].Age'], /number/);
   assert.match(byPath['Kids[2].Age'], /required/);

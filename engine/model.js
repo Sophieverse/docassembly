@@ -56,12 +56,13 @@ function defFromInfo(info) {
     path: info.path,
     name: info.name,
     parent: info.parent,
-    label: humanize(info.path),
+    label: humanize(info.path, info.inferredType),
     type: info.inferredType,
     inferredType: info.inferredType,
     required: !['object', 'list', 'boolean'].includes(info.inferredType),
-    options: info.options ? [...info.options] : undefined,
+    options: info.options && ['selection', 'multiselect'].includes(info.inferredType) ? [...info.options] : undefined,
     inferredOptions: info.options ? [...info.options] : undefined,
+    itemType: info.itemType || undefined,
     help: '',
     formula: undefined,
     listPath: info.listPath || undefined,
@@ -143,7 +144,7 @@ export function applyAnnotations(model, annotations) {
 /** Baseline (non-user) value of a field, given a freshly inferred definition. */
 function inferredBaseline(field, fresh, e) {
   switch (field) {
-    case 'label': return humanize(fresh.path);
+    case 'label': return humanize(fresh.path, e.inferredType);
     case 'type': return e.inferredType;
     case 'required': return defaultRequired(e.inferredType);
     case 'help': return '';
@@ -211,6 +212,9 @@ export function mergeModel(existing, analysis) {
       else merged[field] = undefined;
     }
     if (userEdited.type && e.type === 'computed' && !userEdited.formula) merged.formula = e.formula;
+    // options belong to choice types only: switching a variable to text in the UI drops them (inferredOptions stay as suggestions)
+    if (!['selection', 'multiselect'].includes(merged.type) && (userEdited.type || !userEdited.options)) merged.options = undefined;
+    else if (['selection', 'multiselect'].includes(merged.type) && !merged.options && !userEdited.options) merged.options = f.inferredOptions ? [...f.inferredOptions] : undefined;
     delete merged.fromTemplate;
     out.variables[path] = merged;
     out.order.push(path);
@@ -234,6 +238,8 @@ export function mergeModel(existing, analysis) {
       const field = k === 'minlength' ? 'minLength' : k === 'maxlength' ? 'maxLength' : k;
       if (!isUserEdited(e, field, f)) keep[k] = v;
     }
+    // @options with user-edited options: the variable is still a choice unless the user changed its type
+    if (ann.options && !keep.options && !ann.type && !isUserEdited(e, 'type', f) && !['selection', 'multiselect'].includes(out.variables[path]?.type)) keep.type = 'selection';
     if (Object.keys(keep).length) filtered.set(path, keep);
   }
   applyAnnotations(out, filtered);

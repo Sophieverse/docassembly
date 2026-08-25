@@ -52,22 +52,29 @@ const NAME_HINTS = [
 const TYPE_RANK = { text: 0, email: 1, phone: 1, longtext: 1, selection: 2, number: 3, currency: 4, date: 4, boolean: 3, list: 6, object: 6 };
 
 /**
- * Humanize a path: "Client.IsMarried" → "Client — Is married?", "SigningDate" → "Signing date".
+ * Humanize a path: "Client.IsMarried" → "Client — Is married?", "SigningDate" → "Signing date",
+ * "BuiltBefore1978" → "Built before 1978", "ROFRDays" → "ROFR days".
  * @param {string} path
+ * @param {string} [type] variable type; a boolean label always ends with "?"
  * @returns {string}
  */
-export function humanize(path) {
+export function humanize(path, type) {
   const segs = String(path).replace(/\[\]/g, '').split('.').filter(Boolean);
-  return segs.map((seg, i) => humanizeName(seg, i === segs.length - 1)).join(' — ');
+  const out = segs.map((seg, i) => humanizeName(seg, i === segs.length - 1)).join(' — ');
+  return type === 'boolean' && out && !out.endsWith('?') ? out + '?' : out;
 }
 function humanizeName(name, isLeaf) {
   const words = name
     .replace(/[_\-]+/g, ' ')
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/([A-Za-z])(\d)/g, '$1 $2')
+    .replace(/(\d)([A-Za-z])/g, '$1 $2')
     .trim()
-    .split(/\s+/);
-  const keepUpper = (w) => /^(DOB|SSN|EIN|ID|LLC|LLP|PC|USA|US|UK|ZIP|URL|ABN|DBA|PO|APN)$/i.test(w) && w === w.toUpperCase();
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length) return '';
+  const keepUpper = (w) => (w.length >= 2 && /^[A-Z]+$/.test(w)) || (/^(DOB|SSN|EIN|ID|LLC|LLP|PC|USA|US|UK|ZIP|URL|ABN|DBA|PO|APN)$/i.test(w) && w === w.toUpperCase());
   const out = words.map((w, i) => (keepUpper(w) ? w.toUpperCase() : i === 0 ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w.toLowerCase())).join(' ');
   const q = isLeaf && /^(Is|Has|Can|Should|Will|Does|Did|Wants|Needs|Includes?)\s/.test(out);
   return q ? out + '?' : out;
@@ -110,7 +117,7 @@ export function analyze(ast) {
     let isListItemField = false, listPath = null;
     if (parent && parent.endsWith('[]')) { listPath = parent.slice(0, -2); parent = listPath; isListItemField = true; }
     else if (parent && parent.includes('[]')) { isListItemField = true; listPath = parent.slice(0, parent.lastIndexOf('[]')); }
-    const info = { path, name, parent, inferredType: 'text', typeRank: -1, options: undefined, usedIn: [], gatedBy: [], filters: [], isListItemField, listPath, contexts: new Set() };
+    const info = { path, name, parent, inferredType: 'text', typeRank: -1, altType: 'text', altRank: -1, options: undefined, usedIn: [], gatedBy: [], filters: [], isListItemField, listPath, contexts: new Set() };
     variables.set(path, info);
     if (parent) {
       const p = ensure(parent, ctx);
@@ -119,9 +126,13 @@ export function analyze(ast) {
     return info;
   };
 
-  const setType = (info, type, rank = TYPE_RANK[type] ?? 0) => {
+  const setType = (info, type, rank = TYPE_RANK[type] ?? 0, fromBareCond = false) => {
     if (rank > info.typeRank || (rank === info.typeRank && info.inferredType === 'text')) { info.inferredType = type; info.typeRank = rank; }
+    // Evidence other than a bare `{[if X]}` is remembered separately so a has-value check can be demoted later.
+    if (!fromBareCond && (rank > info.altRank || (rank === info.altRank && info.altType === 'text'))) { info.altType = type; info.altRank = rank; }
   };
+  /** The value node a filter chain / nested call is applied to: `Day|default:"1"|ordinal` → Day. */
+  const chainRoot = (n) => { while (n && (n.type === 'filter' || (n.type === 'call' && n.args.length))) n = n.type === 'filter' ? n.target : n.args[0]; return n; };
 
   /**
    * Resolve an identifier path to its full variable path given the list context stack.
@@ -166,8 +177,8 @@ export function analyze(ast) {
         const fname = (pathOf(n.callee) || '').toLowerCase();
         if (LIST_FUNCS.has(fname) && n.args[0] && pathOf(n.args[0]) === raw) setType(info, 'list');
       }
-      if (n.type === 'filter' && LIST_FUNCS.has(n.name.toLowerCase()) && pathOf(n.target) === raw && n.name.toLowerCase() !== 'len' && n.name.toLowerCase() !== 'length') setType(info, 'list');
-      if (n.type === 'filter' && pathOf(n.target) === raw) {
+      if (n.type === 'filter' && LIST_FUNCS.has(n.name.toLowerCase()) && pathOf(chainRoot(n.target)) === raw && n.name.toLowerCase() !== 'len' && n.name.toLowerCase() !== 'length' && !chainHasListReducer(n.target)) setType(info, 'list');
+      if (n.type === 'filter' && pathOf(chainRoot(n.target)) === raw && !chainHasListReducer(n.target)) {
         const f = n.name.toLowerCase();
         if (CURRENCY_FILTERS.has(f)) setType(info, 'currency');
         else if (NUMBER_FILTERS.has(f)) setType(info, 'number');
@@ -184,6 +195,13 @@ export function analyze(ast) {
       if (n.type === 'call') {
         const fname = (pathOf(n.callee) || '').toLowerCase();
         const argIdx = n.args.findIndex((a) => pathOf(a) === raw);
+        if (argIdx === -1 && n.args.length && pathOf(chainRoot(n.args[0])) === raw && !chainHasListReducer(n.args[0]) && n.args[0].type !== 'ident' && n.args[0].type !== 'member') {
+          // ordinal(default(Day, "1")): the outer function types the chain's root value
+          const fname2 = (pathOf(n.callee) || '').toLowerCase();
+          if (CURRENCY_FILTERS.has(fname2)) setType(info, 'currency');
+          else if (NUMBER_FILTERS.has(fname2)) setType(info, 'number');
+          else if (DATE_FILTERS.has(fname2)) setType(info, 'date');
+        }
         if (argIdx === 0) {
           if (CURRENCY_FILTERS.has(fname)) setType(info, 'currency');
           else if (NUMBER_FILTERS.has(fname)) setType(info, 'number');
@@ -206,8 +224,11 @@ export function analyze(ast) {
         }
       }
     });
-    if (context === 'condition' && isBare) { if (info.typeRank < TYPE_RANK.boolean) info.bareCond = true; setType(info, 'boolean'); }
-    else if (context === 'field' && !filters.length && !calls.length && (exprAst.type === 'ident' || exprAst.type === 'member') && pathOf(exprAst) === raw) info.plainField = true;
+    if (context === 'condition' && isBare) { info.bareCond = true; setType(info, 'boolean', TYPE_RANK.boolean, true); }
+    else {
+      info.nonBareUse = true;
+      if (context === 'field' && !filters.length && !calls.length && (exprAst.type === 'ident' || exprAst.type === 'member') && pathOf(exprAst) === raw) info.plainField = true;
+    }
     // name hints (lower priority than explicit filter evidence)
     if (info.typeRank < 3) {
       for (const [re, t] of NAME_HINTS) {
@@ -252,15 +273,33 @@ export function analyze(ast) {
 
   const { annotations, annotationErrors } = collectAnnotations(ast);
 
+  const nameForcesBoolean = (v) => /^(Is|Has|Can|Should|Will|Does|Did|Wants|Needs|Includes?)[A-Z_]/.test(v.name) || /^(is|has)$/i.test(v.name);
   for (const v of variables.values()) {
-    // `{[if Notes]}{[Notes]}{[end if]}`: a bare condition on a variable that is also printed is a
-    // "has a value" check, not a Yes/No question.
-    if (v.bareCond && v.plainField && v.inferredType === 'boolean' && !/^(Is|Has|Can|Should|Will|Does|Did|Wants|Needs|Includes?)[A-Z_]/.test(v.name)) {
+    // `{[if Notes]}{[Notes]}{[end if]}` / `{[if Court]} in the {[Court|upper]}{[end if]}`: a bare condition on a
+    // variable that is also printed, filtered, compared or passed to a function is a "has a value" check,
+    // not a Yes/No question — unless the name itself says boolean (IsMarried, HasChildren).
+    if (v.bareCond && v.nonBareUse && v.inferredType === 'boolean' && !nameForcesBoolean(v)) {
+      // altType is the best evidence that is not a bare condition (a `format:"on":"off"` still says boolean)
+      if (v.altRank >= 0) { v.inferredType = v.altType; v.typeRank = v.altRank; }
+      else { v.inferredType = 'text'; v.typeRank = -1; for (const [re, t] of NAME_HINTS) if (re.test(v.name)) { setType(v, t, Math.max(TYPE_RANK[t] ?? 0, 2)); break; } }
+    }
+    // A single literal comparison (`{[if State = "CA"]}…{[else]}`) is not enough for a choice list:
+    // keep it text and offer the literal as a suggestion (options → model.inferredOptions).
+    if (v.inferredType === 'selection' && (!v.options || v.options.length < 2)) {
       v.inferredType = 'text'; v.typeRank = -1;
       for (const [re, t] of NAME_HINTS) if (re.test(v.name)) { setType(v, t, Math.max(TYPE_RANK[t] ?? 0, 2)); break; }
     }
-    delete v.typeRank; delete v.bareCond; delete v.plainField; v.contexts = [...v.contexts];
+    delete v.typeRank; delete v.bareCond; delete v.plainField; delete v.nonBareUse; delete v.altType; delete v.altRank; v.contexts = [...v.contexts];
   }
+  // A list with no item fields ({[Names|join]}, {[list Names]}{[_item]}{[end list]}) is a list of plain values.
+  for (const v of variables.values()) {
+    if (v.inferredType !== 'list') continue;
+    const prefix = v.path + '[].';
+    let hasChildren = false;
+    for (const p of variables.keys()) if (p.startsWith(prefix)) { hasChildren = true; break; }
+    if (!hasChildren) v.itemType = 'text';
+  }
+
   return { variables, structure, annotations, annotationErrors };
 }
 
@@ -308,7 +347,7 @@ export function collectAnnotations(ast) {
             case 'min': case 'max': target[a.key] = /^-?\d+(\.\d+)?$/.test(a.value) ? Number(a.value) : a.value; break;
             case 'minlength': case 'maxlength': {
               const num = Number(a.value);
-              if (!Number.isInteger(num) || num < 0) { annotationErrors.push({ message: `@${a.key} ${a.path}: expected a whole number, got "${a.value}"`, line: n.line + i, col: n.col }); break; }
+              if (!Number.isInteger(num) || num < 0) { annotationErrors.push({ message: `@${ANNOTATION_FIELD[a.key]} ${a.path}: expected a whole number, got "${a.value}"`, line: n.line + i, col: n.col }); break; }
               target[ANNOTATION_FIELD[a.key]] = num; break;
             }
             case 'pattern':
@@ -338,6 +377,17 @@ export function collectAnnotations(ast) {
   };
   visit(ast.body || []);
   return { annotations, annotationErrors };
+}
+
+/** Is there a list-reducing filter/call (count, join, sum…) between the chain root and this node? */
+const LIST_REDUCERS = new Set(['count', 'sum', 'join', 'punc', 'first', 'last', 'len', 'length', 'any', 'all', 'every', 'some', 'find', 'reduce', 'min', 'max', 'group', 'groupby']);
+function chainHasListReducer(n) {
+  while (n && (n.type === 'filter' || n.type === 'call')) {
+    const name = (n.type === 'filter' ? n.name : pathOf(n.callee) || '').toLowerCase();
+    if (LIST_REDUCERS.has(name)) return true;
+    n = n.type === 'filter' ? n.target : n.args[0];
+  }
+  return false;
 }
 
 function walkExpr(n, fn) {
@@ -569,14 +619,17 @@ export function questionnaire(ast, data, model) {
     seen.add(path);
     const q = {
       path,
-      label: def && def.label ? def.label : humanize(path),
+      label: def && def.label ? def.label : humanize(path, type),
       type,
       required: def ? def.required !== false : true,
       answered: !rel.unanswered.some((u) => u.replace(/\[\d+\]/g, '[]') === path),
     };
     const options = def && def.options ? def.options : info && info.options;
-    if (options && options.length) q.options = options;
+    if (options && options.length && (type === 'selection' || type === 'multiselect')) q.options = options;
+    else if (options && options.length && ['text', 'longtext'].includes(type)) q.suggestions = options;
     if (info && info.listPath) q.listPath = info.listPath;
+    const itemType = def && def.itemType ? def.itemType : info && info.itemType;
+    if (type === 'list' && itemType) q.itemType = itemType;
     if (def && def.help) q.help = def.help;
     if (def) {
       for (const k of ['min', 'max', 'minLength', 'maxLength', 'pattern', 'default']) if (def[k] !== undefined && def[k] !== null && def[k] !== '') q[k] = def[k];

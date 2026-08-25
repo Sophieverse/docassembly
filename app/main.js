@@ -6,6 +6,7 @@ import { route, start, navigate, dispatch, setNotFound } from './router.js';
 import * as store from './store.js';
 import { toast, modal, el, download } from './components.js';
 import { modelFor } from './docgen.js';
+import { compile, mergeModel } from './engine-api.js';
 import { renderTemplates } from './ui-templates.js';
 import { renderEditor } from './ui-editor.js';
 import { renderInterview } from './ui-interview.js';
@@ -95,7 +96,16 @@ setNotFound(wrap((m, ctx) => {
 
 /* ---------- first run ---------- */
 export function loadSample(sample) {
-  const t = store.newTemplate({ name: sample.name, description: sample.description || '', text: sample.text, model: modelFor(sample.text) });
+  // Samples may ship a curated model (labels/types/options/help); merge it with what analysis discovers so new variables still appear.
+  let model = modelFor(sample.text);
+  if (sample.model && typeof sample.model === 'object') {
+    try {
+      const c = compile(sample.text || '');
+      const base = sample.model.variables ? sample.model : { variables: sample.model, order: [] };
+      model = c.errors.length ? JSON.parse(JSON.stringify(base)) : mergeModel(JSON.parse(JSON.stringify(base)), c.analysis);
+    } catch (e) { console.warn('sample model merge failed', e); }
+  }
+  const t = store.newTemplate({ name: sample.name, description: sample.description || '', text: sample.text, model });
   if (sample.sampleAnswers) store.templates.update(t.id, { sampleAnswers: sample.sampleAnswers }, { silent: true });
   return t;
 }

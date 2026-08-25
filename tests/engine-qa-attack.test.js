@@ -271,7 +271,7 @@ test('selection options are inferred from every string comparison, including ter
   assert.equal(a.variables.get('State').inferredType, 'selection');
   assert.deepEqual(a.variables.get('State').options, ['CA', 'NY', 'TX']);
   const t = analyze(parse('{[State = "CA" ? "cal" : "other"]}')).variables.get('State');
-  assert.equal(t.inferredType, 'selection');
+  assert.equal(t.inferredType, 'text'); // one literal is a suggestion, not a choice list
   assert.deepEqual(t.options, ['CA']);
   assert.deepEqual(analyze(parse('{[if State != "CA"]}a{[endif]}')).variables.get('State').options, ['CA']);
   const inList = analyze(parse('{[list Kids]}{[if Role = "Executor"]}x{[elseif Role = "Trustee"]}y{[endif]}{[endlist]}')).variables.get('Kids[].Role');

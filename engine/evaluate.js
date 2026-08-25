@@ -65,6 +65,16 @@ export function itemVars(item, i, n, itemName, punc) {
   return base;
 }
 
+/** `{[X|blank]}` / `{[blank(X)]}`: printing nothing is the point, so a missing X is not a warning. */
+function endsWithBlank(expr) {
+  for (let n = expr; n; n = n.type === 'filter' ? n.target : n.type === 'call' ? n.args[0] : null) {
+    const name = n.type === 'filter' ? n.name : n.type === 'call' ? pathOf(n.callee) || '' : '';
+    if (name.toLowerCase() === 'blank') return true;
+    if (n.type !== 'filter' && n.type !== 'call') break;
+  }
+  return false;
+}
+
 /**
  * Render an AST with data.
  * @param {Object} ast   from parse()
@@ -115,7 +125,7 @@ export function render(ast, data, options = {}) {
       case 'field': {
         const { value, missing } = evalIn(node.expr, scope, node.src, node);
         const text = formatValue(value, fieldOpts(node, value));
-        if (text === '' && (value == null || value === '')) {
+        if (text === '' && (value == null || value === '') && !endsWithBlank(node.expr)) {
           const p0 = pathOf(node.expr);
           const paths = missing.size ? [...missing] : p0 && p0.startsWith('_') ? [] : [p0 || node.src];
           for (const p of paths) warn(`Missing value: ${p}`);

@@ -73,16 +73,23 @@ function load() {
     return fromParsed(JSON.parse(raw));
   } catch (e) {
     // Never overwrite the only copy: stash the unreadable text, then fall back to the last good snapshot.
-    console.error('store: stored data is unreadable, keeping a copy', e);
-    const stashKey = KEY + '.corrupt-' + Date.now();
-    let stashed = false;
-    try { localStorage.setItem(stashKey, raw); stashed = true; } catch (e2) { /* quota — keep in memory only */ }
-    recovery = { stashKey: stashed ? stashKey : null, raw, recoveredFromSnapshot: false, error: String(e && e.message || e) };
+    console.warn('store: stored data is unreadable, keeping a copy', e);
+    let stashKey = null;
+    try {
+      // Reuse an identical stash from an earlier load so reloads do not pile up copies.
+      for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.startsWith(KEY + '.corrupt-') && localStorage.getItem(k) === raw) { stashKey = k; break; } }
+      if (!stashKey) { stashKey = KEY + '.corrupt-' + Date.now(); localStorage.setItem(stashKey, raw); }
+    } catch (e2) { stashKey = null; /* quota — keep in memory only */ }
+    recovery = { stashKey, raw, recoveredFromSnapshot: false, error: String(e && e.message || e) };
+    let s = null;
     try {
       const prev = localStorage.getItem(PREV_KEY);
-      if (prev) { const s = fromParsed(JSON.parse(prev)); recovery.recoveredFromSnapshot = true; return s; }
+      if (prev) { s = fromParsed(JSON.parse(prev)); recovery.recoveredFromSnapshot = true; }
     } catch (e3) { /* snapshot also bad */ }
-    return emptyState();
+    if (!s) s = emptyState();
+    // Only once the unreadable text is safely stashed, replace the main key so the app is consistent on the next load.
+    if (stashKey) { try { localStorage.setItem(KEY, JSON.stringify(s)); } catch (e4) { /* leave as is */ } }
+    return s;
   }
 }
 
@@ -113,7 +120,7 @@ export function flush() {
     // Out of room: drop the snapshot and retry once before giving up.
     try { localStorage.removeItem(PREV_KEY); localStorage.setItem(KEY, json); lastError = null; return true; } catch (e2) { /* fall through */ }
     lastError = e;
-    console.error('store: save failed', e);
+    console.warn('store: save failed', e);
     const quota = /quota|exceeded|storage/i.test(String(e && (e.name + ' ' + e.message)));
     emit({ type: 'error', quota, error: e });
     return false;
