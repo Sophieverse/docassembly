@@ -5,6 +5,12 @@
 const routes = [];
 let current = null;
 let onLeave = null;
+let notFound = null;
+
+const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+/** Handler for unmatched paths (otherwise the router redirects to /templates). */
+export function setNotFound(fn) { notFound = fn; }
 
 export function route(pattern, handler) {
   const keys = [];
@@ -39,20 +45,26 @@ export async function dispatch() {
     onLeave = null;
   }
   lastHash = location.hash;
+  // Views set window.onbeforeunload while dirty; never let a stale guard outlive its view.
+  window.onbeforeunload = null;
   const { path, query } = parseHash();
+  const dec = (v) => { try { return decodeURIComponent(v); } catch (e) { return v; } };
+  const run = async (handler, params) => {
+    current = { path, params, query };
+    try {
+      await handler({ params, query, path });
+    } catch (e) {
+      console.error(e);
+      const main = document.getElementById('main');
+      if (main) main.innerHTML = `<div class="card"><h2>Something went wrong</h2><pre>${esc(e && e.stack || e)}</pre><a href="#/templates">Back to templates</a></div>`;
+    }
+  };
   for (const r of routes) {
     const m = r.re.exec(path);
     if (m) {
       const params = {};
-      r.keys.forEach((k, i) => { params[k] = decodeURIComponent(m[i + 1]); });
-      current = { path, params, query };
-      try {
-        await r.handler({ params, query, path });
-      } catch (e) {
-        console.error(e);
-        const main = document.getElementById('main');
-        if (main) main.innerHTML = `<div class="card"><h2>Something went wrong</h2><pre>${String(e && e.stack || e).replace(/</g, '&lt;')}</pre></div>`;
-      }
+      r.keys.forEach((k, i) => { params[k] = dec(m[i + 1]); });
+      await run(r.handler, params);
       document.querySelectorAll('.topnav a').forEach((a) => {
         const seg = a.dataset.nav;
         a.classList.toggle('active', path === '/' + seg || path.startsWith('/' + seg + '/') || (seg === 'templates' && (path.startsWith('/interview') || path.startsWith('/output'))));
@@ -60,6 +72,7 @@ export async function dispatch() {
       return;
     }
   }
+  if (notFound) { await run(notFound, {}); document.querySelectorAll('.topnav a').forEach((a) => a.classList.remove('active')); return; }
   navigate('/templates', { replace: true });
 }
 

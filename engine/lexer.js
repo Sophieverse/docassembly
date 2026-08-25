@@ -45,6 +45,16 @@ export function normalizeSmartQuotes(s) {
     .replace(/[–—]/g, '-');
 }
 
+/** Index of the "]}" that balances nested "{[" … "]}" pairs starting at `from`, or -1. */
+function balancedClose(src, from) {
+  let depth = 0;
+  for (let i = from; i < src.length; i++) {
+    if (src.startsWith(OPEN, i)) { depth++; i++; }
+    else if (src.startsWith(CLOSE, i)) { if (depth === 0) return i; depth--; i++; }
+  }
+  return -1;
+}
+
 /**
  * Split template text into text and field tokens.
  * @param {string} templateText
@@ -77,13 +87,15 @@ export function tokenize(templateText) {
       pos = open;
     }
     const startLine = line, startCol = col;
-    const close = src.indexOf(CLOSE, open + OPEN.length);
+    // A comment may mention tags ({[# wrap in {[if X]} … {[end if]} ]}): it ends at the "]}" that balances it.
+    const isComment = /^\s*#/.test(src.slice(open + OPEN.length, open + OPEN.length + 8));
+    const close = isComment ? balancedClose(src, open + OPEN.length) : src.indexOf(CLOSE, open + OPEN.length);
     if (close === -1) {
       throw new TemplateError(`Unterminated field: "{[" has no matching "]}"`, startLine, startCol);
     }
     // A second "{[" before the close is almost always a typo like {[Name} ... {[Other]}
     const nextOpen = src.indexOf(OPEN, open + OPEN.length);
-    if (nextOpen !== -1 && nextOpen < close) {
+    if (!isComment && nextOpen !== -1 && nextOpen < close) {
       throw new TemplateError(`Unterminated field: "{[" has no matching "]}" before the next "{["`, startLine, startCol);
     }
     const raw = src.slice(open + OPEN.length, close);

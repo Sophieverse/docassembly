@@ -59,8 +59,8 @@ const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 
 export function isDateLike(v) {
   if (v instanceof Date) return !Number.isNaN(v.getTime());
   if (typeof v !== 'string') return false;
-  const s = v.trim();
-  return /^\d{4}-\d{1,2}-\d{1,2}(T.*)?$/.test(s) || /^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(s) || /^[A-Za-z]{3,9}\.? \d{1,2},? \d{4}$/.test(s) || /^\d{1,2} [A-Za-z]{3,9}\.? \d{4}$/.test(s);
+  const s = v.trim().replace(/^[A-Za-z]+day,?\s+/i, '').replace(/(\d)(?:st|nd|rd|th)\b/gi, '$1');
+  return /^\d{4}[-\/]\d{1,2}[-\/]\d{1,2}(T.*)?$/.test(s) || /^\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}$/.test(s) || /^[A-Za-z]{3,9}\.? \d{1,2},? \d{4}$/.test(s) || /^\d{1,2} [A-Za-z]{3,9}\.? \d{4}$/.test(s);
 }
 
 /**
@@ -73,10 +73,11 @@ export function parseDate(v) {
   if (v == null || v === '') return null;
   if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : new Date(v.getFullYear(), v.getMonth(), v.getDate());
   if (typeof v === 'number') { const d = new Date(v); return Number.isNaN(d.getTime()) ? null : new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
-  const s = String(v).trim();
+  // Tolerate a leading weekday ("Tuesday, March 5, 2026") and ordinal suffixes ("March 5th, 2026").
+  const s = String(v).trim().replace(/^[A-Za-z]+day,?\s+/i, '').replace(/(\d)(?:st|nd|rd|th)\b/gi, '$1');
   let m;
-  if ((m = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:T.*)?$/.exec(s))) return mk(+m[1], +m[2], +m[3]);
-  if ((m = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(s))) { let y = +m[3]; if (m[3].length === 2) y += y < 50 ? 2000 : 1900; return mk(y, +m[1], +m[2]); }
+  if ((m = /^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})(?:T.*)?$/.exec(s))) return mk(+m[1], +m[2], +m[3]);
+  if ((m = /^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/.exec(s))) { let y = +m[3]; if (m[3].length === 2) y += y < 50 ? 2000 : 1900; return mk(y, +m[1], +m[2]); }
   if ((m = /^([A-Za-z]{3,9})\.? (\d{1,2}),? (\d{4})$/.exec(s))) { const mo = monthIndex(m[1]); return mo < 0 ? null : mk(+m[3], mo + 1, +m[2]); }
   if ((m = /^(\d{1,2}) ([A-Za-z]{3,9})\.? (\d{4})$/.exec(s))) { const mo = monthIndex(m[2]); return mo < 0 ? null : mk(+m[3], mo + 1, +m[1]); }
   return null;
@@ -130,9 +131,19 @@ export function formatDate(value, pattern = 'long') {
   let pat = DATE_PRESETS[lp] || inferDatePattern(p) || p;
   pat = pat.replace(/\\\[/g, '[').replace(/\\\]/g, ']');
   const y = d.getFullYear(), mo = d.getMonth(), day = d.getDate(), dow = d.getDay();
-  return pat.replace(/\[([^\]]*)\]|'([^']*)'|yyyy|YYYY|yy|YY|MMMM|MMM|MM|M|dddd|ddd|DD|Do|D|dd|d|EEEE|EEE|E/g, (tok, lit1, lit2) => {
+  // A run of letters is only expanded when it is made entirely of tokens; plain words
+  // ("day of", "Dated") pass through as literal text.
+  return pat.replace(/\[([^\]]*)\]|'([^']*)'|[A-Za-z]+/g, (word, lit1, lit2) => {
     if (lit1 !== undefined) return lit1;
     if (lit2 !== undefined) return lit2;
+    if (!DATE_TOKEN_WORD.test(word)) return word;
+    return word.replace(DATE_TOKEN, (tok) => dateToken(tok, y, mo, day, dow));
+  });
+}
+const DATE_TOKEN = /yyyy|YYYY|yy|YY|MMMM|MMM|MM|M|dddd|ddd|DD|Do|D|dd|d|EEEE|EEE|E/g;
+const DATE_TOKEN_WORD = /^(?:yyyy|YYYY|yy|YY|MMMM|MMM|MM|M|dddd|ddd|DD|Do|D|dd|d|EEEE|EEE|E)+$/;
+function dateToken(tok, y, mo, day, dow) {
+  {
     switch (tok) {
       case 'yyyy': case 'YYYY': return String(y);
       case 'yy': case 'YY': return pad2(y % 100);
@@ -147,7 +158,7 @@ export function formatDate(value, pattern = 'long') {
       case 'EEE': case 'E': case 'ddd': return DAYS[dow].slice(0, 3);
       default: return tok;
     }
-  });
+  }
 }
 
 /**
@@ -167,8 +178,8 @@ export function inferDatePattern(ex) {
     return `${M}/${D}/${m[3].length === 2 ? 'YY' : 'YYYY'}`;
   }
   if ((m = /^(\d{1,2})(st|nd|rd|th) day of ([A-Za-z]+)(,?) (\d{4})$/i.exec(s))) return `Do [day of] MMMM${m[4]} YYYY`;
-  if ((m = new RegExp(`^([A-Za-z]+day), ([A-Za-z]+) (\\d{1,2})(${ORD})?, (\\d{4})$`).exec(s))) {
-    return `${m[1].length > 3 ? 'EEEE' : 'EEE'}, ${monthTok(m[2])} ${m[4] ? 'Do' : 'D'}, YYYY`;
+  if ((m = new RegExp(`^([A-Za-z]+day|Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\\.?, ([A-Za-z]+)\\.? (\\d{1,2})(${ORD})?, (\\d{4})$`, 'i').exec(s)) && monthIndex(m[2]) >= 0) {
+    return `${m[1].length > 5 ? 'EEEE' : 'EEE'}, ${monthTok(m[2])} ${m[4] ? 'Do' : 'D'}, YYYY`;
   }
   if ((m = new RegExp(`^([A-Za-z]+)\\.? (\\d{1,2})(${ORD})?,? (\\d{4})$`).exec(s)) && monthIndex(m[1]) >= 0) {
     return `${monthTok(m[1])} ${m[3] ? 'Do' : 'D'}${s.includes(',') ? ',' : ''} YYYY`;
@@ -432,7 +443,14 @@ export function contains(hay, needle) {
 export function startswith(s, prefix) { return str(s).toLowerCase().startsWith(str(prefix).toLowerCase()); }
 export function endswith(s, suffix) { return str(s).toLowerCase().endsWith(str(suffix).toLowerCase()); }
 export function replace(s, find, rep = '') { const src = str(s); if (isBlank(find)) return src; return src.split(str(find)).join(str(rep)); }
-export function initials(name, sep = '') { return str(name).split(/[\s\-]+/).filter(Boolean).map((w) => w[0].toUpperCase() + (sep && sep !== '' ? '.' : '')).join(sep); }
+/** initials("Ann Lee") → "AL"; initials(name, ".") → "A.L."; initials(name, " ") → "A. L.". */
+export function initials(name, sep = '') {
+  const parts = str(name).split(/[\s\-]+/).filter(Boolean).map((w) => w[0].toUpperCase());
+  const s = str(sep);
+  if (s === '') return parts.join('');
+  if (s === '.') return parts.map((c) => c + '.').join('');
+  return parts.map((c) => c + '.').join(s);
+}
 export function nbsp() { return ' '; }
 export function blank() { return ''; }
 /** "James" → "James'", "Mary" → "Mary's". */
@@ -461,17 +479,11 @@ export function pronoun(gender, form = 'subject') {
 export function pluralize(count, singular = '', plural, bare = false) {
   const n = Array.isArray(count) ? count.length : num(count);
   const c = Number.isNaN(n) ? 0 : n;
-  const pl = plural == null || plural === '' ? defaultPlural(singular) : plural;
+  const pl = plural == null || plural === '' ? pluralOf(singular) : plural;
   const word = c === 1 ? singular : pl;
   return bare === true || bare === 'bare' ? str(word) : `${number(c)} ${word}`.trim();
 }
-function defaultPlural(s) {
-  const w = str(s);
-  if (!w) return '';
-  if (/(s|x|z|ch|sh)$/i.test(w)) return w + 'es';
-  if (/[^aeiou]y$/i.test(w)) return w.slice(0, -1) + 'ies';
-  return w + 's';
-}
+function pluralOf(s) { return plural(s); }
 
 /**
  * join(["A","B","C"]) → "A, B, and C"; join(list, "or"); join(list, "and", false) → "A, B and C".
@@ -590,6 +602,9 @@ export function article(word) {
   const w = str(word).trim();
   if (!w) return '';
   const lw = w.toLowerCase();
+  // Initialisms are read letter by letter: "an LLC", "an FBI agent", "an MBA"; numbers by sound: "an 8", "an 11".
+  if (/^[A-Z]{2,}\b/.test(w) && w !== w.toLowerCase()) return /^[AEFHILMNORSX]/.test(w) ? 'an' : 'a';
+  if (/^\d/.test(w)) return /^(8|11|18|8\d)(\D|$)/.test(w) ? 'an' : 'a';
   if (/^(hour|honest|honor|heir)/.test(lw)) return 'an';
   if (/^(uni|use|user|utah|one|eu|euro)/.test(lw)) return 'a';
   return /^[aeiou]/.test(lw) ? 'an' : 'a';
@@ -723,7 +738,7 @@ const lastN = (v, n) => { const k = n == null ? 1 : Number(n); return Array.isAr
  * Methods callable with dot syntax on values: `Name.toUpperCase()`, `Children.first()`, `Fee.toInt()`.
  * Each receives the receiver as first argument.
  */
-export const methods = {
+export const methods = Object.assign(Object.create(null), {
   toUpperCase: upper, toLowerCase: lower, toupper: upper, tolower: lower, upper, lower, trim, title, capitalize, initcap,
   length: len, len, count,
   includes: contains, contains, startsWith: startswith, startswith, endsWith: endswith, endswith, replace,
@@ -746,7 +761,7 @@ export const methods = {
   format, year, month, day, weekday, monthName, addDays, addMonths, addYears, age: yearsBetween,
   toFixed: (v, d = 0) => { const n = num(v); return Number.isNaN(n) ? '' : n.toFixed(Number(d)); },
   round, abs, words, ordinal, ordinalwords, currency, number, dollars, isEmpty, punc, plural, possessive, initials,
-};
+});
 
 // ---------------------------------------------------------------- namespaces (date.*, math.*, finance.*)
 
@@ -817,7 +832,7 @@ const financeNs = { PMT, PV, FV, NPER, RATE, pmt: PMT, pv: PV, fv: FV, nper: NPE
 const mathNs = Object.fromEntries(Object.getOwnPropertyNames(Math).map((k) => [k, typeof Math[k] === 'function' ? (...a) => Math[k](...a.map(num)) : Math[k]]));
 
 /** Namespaced helpers: `date.today()`, `math.floor(x)`, `finance.PMT(rate, nper, pv)`. */
-export const namespaces = { date: dateNs, math: mathNs, finance: financeNs };
+export const namespaces = Object.assign(Object.create(null), { date: dateNs, math: mathNs, finance: financeNs });
 export { PMT, PV, FV, NPER, RATE, monthsBetween, addWeeks, subDays };
 
 // ---------------------------------------------------------------- registry
@@ -827,7 +842,7 @@ export { PMT, PV, FV, NPER, RATE, monthsBetween, addWeeks, subDays };
  * (lower-case keys are canonical).
  * @type {Object<string, Function>}
  */
-export const functions = {
+export const functions = Object.assign(Object.create(null), {
   upper, lower, title, titlecase: title, capitalize, trim, currency, number, words, dollars, dollarswords: dollarsWords, dollarsWords, dollarsfull: dollarsFull, dollarsFull, dollarsandcents: dollarsAndCents, dollarsAndCents, cents,
   isare: isAre, isAre, hashave: hasHave, hasHave, doesdo: doesDo, doesDo, waswere: wasWere, wasWere, article, plural, quantity, salutation, punc, roman, alpha,
   ordinal, ordinalwords, ordinalWords: ordinalwords, format, formatdate: formatDate, formatDate, default: dflt, pluralize, join, possessive, pronoun, initials,
@@ -839,7 +854,7 @@ export const functions = {
   else: dflt, initcap, titlecaps, cardinal, ordsuffix, cardinaldec, cardinalcur, ordinalword, find: (l, f, v) => filter(l, f, v)[0], every: all, some: any,
   group: (l, f) => { const g = new Map(); asList(l).forEach((it) => { const k = getField(it, f); if (!g.has(k)) g.set(k, { _key: k, _values: [] }); g.get(k)._values.push(it); }); return [...g.values()]; },
   pmt: PMT, pv: PV, fv: FV, nper: NPER, monthsbetween: monthsBetween, monthsBetween, addweeks: addWeeks, addWeeks, subdays: subDays, subDays,
-};
+});
 
 /**
  * Register a custom function/filter (also usable as `{[value|name]}`).
@@ -848,6 +863,7 @@ export const functions = {
  */
 export function registerFunction(name, fn) {
   if (typeof fn !== 'function') throw new TypeError('registerFunction expects a function');
+  if (/^(__proto__|constructor|prototype)$/i.test(name)) throw new TypeError(`Cannot register a function named "${name}"`);
   functions[name] = fn;
   functions[name.toLowerCase()] = fn;
 }

@@ -26,13 +26,14 @@ The Client has a domestic partner, {[Partner.FullName]}.
 {[else]}
 The Client is single.
 {[end if]}</pre>
-<p>Spellings <code>end if</code>, <code>endif</code>, <code>else if</code>, <code>elseif</code> and <code>elif</code> all work. A variable used by itself in an <code>if</code> becomes a Yes/No question. Questions inside a condition are only asked when the condition is true — that is the whole point.</p>
+<p>Spellings <code>end if</code>, <code>endif</code>, <code>else if</code>, <code>elseif</code> and <code>elif</code> all work. A variable used by itself in an <code>if</code> becomes a Yes/No question (even if it is also printed as text — use <code>{[if not isEmpty(Court)]}</code> for optional text, or fix the type in the Variables tab). Questions inside a condition are only asked when the condition is true — that is the whole point.</p>
+<p><strong>Blank lines.</strong> A block tag alone on a line is removed with its line, but blank lines around it are kept. Start an optional paragraph with the blank line <em>inside</em> the block (<code>{[if X]}</code>, blank line, paragraph, <code>{[end if]}</code>) so skipping it never leaves a double blank line. Inside a sentence, keep the leading space inside the tag: <code>due.{[if X]} Interest accrues.{[end if]}</code>.</p>
 <p>Conditions can be expressions: <code>{[if count(Children) > 2 and Client.State = "CA"]}</code>, <code>{[if not Client.IsMarried]}</code>, <code>{[if Fee >= 5000 or Retainer]}</code>.</p>
 
 <h2>Lists (repeating items)</h2>
 <pre>{[list Children]}{[Name]}, born {[DOB|format:"long"]}{[_punc]}{[end list]}</pre>
 <p>Inside a list, bare names refer to the current item (<code>Name</code> = the child's name); outer variables still work. Helpers: <code>{[_index]}</code> (1, 2, 3…), <code>{[_first]}</code> / <code>{[_last]}</code> (true/false), <code>{[_punc]}</code> (automatic ", " / ", and " / "."). Filter items: <code>{[list Children|filter: Age &lt; 18]}</code>.</p>
-<p>List functions: <code>count(Children)</code>, <code>any(Children, Age &lt; 18)</code>, <code>sum(Invoices, Amount)</code>.</p>
+<p>List functions: <code>count(Children)</code>, <code>any(Children, Age &lt; 18)</code>, <code>sum(Invoices, Amount)</code>. Per-item tests also work as filters, including in conditions: <code>{[if Children|any: yearsBetween(DOB, today()) &lt; 18]}</code> decides whether a guardianship article is needed without asking an "Is minor?" question. Guard lists that may be empty: <code>{[if count(Children) &gt; 0]}…{[end if]}</code>, or an empty list prints "children: .".</p>
 
 <h2>Expressions</h2>
 <table>
@@ -50,12 +51,13 @@ The Client is single.
 <tr><td>words</td><td><code>{[Fee|words]}</code></td><td>two thousand five hundred</td></tr>
 <tr><td>ordinal / ordinalwords</td><td><code>{[Day|ordinal]}</code></td><td>3rd / third</td></tr>
 <tr><td>format:"…"</td><td><code>{[Date|format:"long"]}</code></td><td>January 5, 2026 (also <code>short</code>, or tokens <code>MMMM d, yyyy</code>)</td></tr>
-<tr><td>default:"…"</td><td><code>{[Title|default:"Agreement"]}</code></td><td>Fallback when empty</td></tr>
-<tr><td>pluralize:"a","b"</td><td><code>{[count(Children)|pluralize:"child","children"]}</code></td><td>child / children</td></tr>
+<tr><td>default:"…"</td><td><code>{[Title|default:"Agreement"]}</code></td><td>Fallback when empty (0 is not empty — use <code>{[if Rent &gt; 0]}</code> for numbers)</td></tr>
+<tr><td>pluralize:"a","b"</td><td><code>{[count(Children)|pluralize:"child","children"]}</code></td><td>1 child / 3 children (add <code>,true</code> to omit the number)</td></tr>
 <tr><td>join:"and"</td><td><code>{[Parties|join:"and"]}</code></td><td>A, B, and C</td></tr>
-<tr><td>possessive</td><td><code>{[Name|possessive]}</code></td><td>James's</td></tr>
-<tr><td>pronoun:"subject|object|possessive"</td><td><code>{[Client.Gender|pronoun:"subject"]}</code></td><td>he / she / they</td></tr>
-<tr><td>initials</td><td><code>{[Name|initials]}</code></td><td>J.D.</td></tr>
+<tr><td>possessive</td><td><code>{[Name|possessive]}</code></td><td>James' / Mary's</td></tr>
+<tr><td>article</td><td><code>{[EntityType|article]} {[EntityType]}</code></td><td>an Oregon LLC / a Delaware corporation</td></tr>
+<tr><td>pronoun:"subject|object|possessive|possessiveadj|reflexive"</td><td><code>{[Client.Gender|pronoun:"subject"]}</code></td><td>he / she / they (Gender = Male / Female / Nonbinary)</td></tr>
+<tr><td>initials</td><td><code>{[Name|initials]}</code> / <code>{[Name|initials:"."]}</code></td><td>JD / J.D.</td></tr>
 </table>
 
 <h2>Document structure (markdown-style)</h2>

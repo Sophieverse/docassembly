@@ -3,10 +3,10 @@
  * #/interview/:templateId and #/interview/pkg/:packageId (?record=ID) — the auto-generated questionnaire.
  */
 import * as store from './store.js';
-import { el, clear, toast, prompt, modal, debounce } from './components.js';
+import { el, clear, toast, prompt, modal, debounce, confirm } from './components.js';
 import { navigate } from './router.js';
 import { questionnaire, validate } from './engine-api.js';
-import { compileCached, renderTemplate, withDerived, getPath, isAnswered } from './docgen.js';
+import { compileCached, renderTemplate, withDerived, getPath, setPath, isAnswered, pruneEmpty } from './docgen.js';
 import { renderQuestion, progress, itemFieldName, groupQuestions, genericPath, ownerOf, fillListFields, patchGroup } from './ui-fields.js';
 
 /** Resolve what to interview: [{template, includeIf}] */
@@ -27,7 +27,7 @@ export function includeIfHolds(expr, data) {
   if (!expr || !expr.trim()) return true;
   try {
     const r = renderTemplate({ text: `{[if ${expr}]}1{[end if]}`, model: null }, data);
-    if (r.errors.length) return true;
+    if (r.errors.length) { console.warn('includeIf expression has a syntax error and is treated as true:', expr, r.errors[0].message); return true; }
     return r.text.trim() === '1';
   } catch (e) { return true; }
 }
@@ -68,12 +68,19 @@ export function renderInterview(main, ctx) {
   let record = recordId ? store.records.get(recordId) : null;
   if (recordId && !record) { toast('Record not found; starting blank'); recordId = null; }
   let data = record ? JSON.parse(JSON.stringify(record.data || {})) : {};
-  // Apply model defaults for unanswered variables
+  // Apply model defaults for unanswered variables (item-field defaults like "Children[].State" are applied when an item is added)
+  const modelVars = {};
   for (const { template: t } of targets) {
     for (const [path, v] of Object.entries((t.model && t.model.variables) || {})) {
-      if (v && v.default !== undefined && getPath(data, path) === undefined) setDefault(data, path, v.default);
+      modelVars[path] = v;
+      if (!v || v.default === undefined || path.includes('[]')) continue;
+      if (getPath(data, path) === undefined) setPath(data, path, JSON.parse(JSON.stringify(v.default)));
     }
   }
+  // Firm defaults from Settings, when a template asks for them and the record has no value.
+  { const s = store.getSettings();
+    if (modelVars.FirmName && s.firmName && getPath(data, 'FirmName') === undefined) setPath(data, 'FirmName', s.firmName);
+    if (modelVars.AttorneyName && s.attorneyName && getPath(data, 'AttorneyName') === undefined) setPath(data, 'AttorneyName', s.attorneyName); }
   let dirty = false;
   let questions = [];
   const elems = new Map(); // path → element
@@ -89,7 +96,7 @@ export function renderInterview(main, ctx) {
     el('a.btn.btn-ghost.btn-sm', { href: template ? `#/templates/${template.id}` : `#/packages/${pkg.id}` }, '← Back'),
     el('h1', name), pkg ? el('span.badge', 'package') : null,
     el('div.actions',
-      template && template.sampleAnswers && !record ? el('button.btn', { type: 'button', onClick: () => { data = JSON.parse(JSON.stringify(template.sampleAnswers)); for (const n of elems.values()) n.remove(); elems.clear(); sig.clear(); dirty = true; refresh(); toast('Sample answers loaded'); } }, 'Use sample answers') : null,
+      template && template.sampleAnswers && !record ? el('button.btn', { type: 'button', onClick: async () => { if (!(await okToReplace())) return; data = JSON.parse(JSON.stringify(template.sampleAnswers)); for (const n of elems.values()) n.remove(); elems.clear(); sig.clear(); dirty = true; refresh(); toast('Sample answers loaded'); } }, 'Use sample answers') : null,
       el('button.btn', { type: 'button', onClick: loadFromRecord }, 'Load from record…'),
       el('button.btn', { type: 'button', onClick: () => saveToRecord() }, 'Save to record'),
     )));
@@ -100,9 +107,19 @@ export function renderInterview(main, ctx) {
   const progressText = el('span.small.muted');
   const progressFill = el('span');
   const form = el('form.interview-form', { novalidate: true, onSubmit: (e) => { e.preventDefault(); generate(); } });
+  // Enter in a text box moves to the next question instead of generating the document.
+  form.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'BUTTON' || e.target.type === 'submit') return;
+    if (!/^(INPUT|SELECT)$/.test(e.target.tagName)) return;
+    e.preventDefault();
+    const f = [...form.querySelectorAll('input:not([disabled]), select:not([disabled]), textarea:not([disabled]), .segmented button')];
+    const next = f[f.indexOf(e.target) + 1];
+    if (next) next.focus();
+  });
   const qHost = el('div');
-  const errSummary = el('div.errors.hidden');
-  form.append(el('div.progress', el('div.progress-bar', progressFill), progressText), errSummary, qHost,
+  const errSummary = el('div.errors.hidden', { role: 'alert', tabindex: '-1' });
+  const progressBar = el('div.progress-bar', { role: 'progressbar', 'aria-label': 'Questions answered', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0' }, progressFill);
+  form.append(el('div.progress', progressBar, progressText), errSummary, qHost,
     el('div.sticky-actions',
       el('button.btn.btn-primary', { type: 'submit' }, 'Generate document' + (targets.length > 1 ? 's' : '') + ' →'),
       el('button.btn', { type: 'button', onClick: () => saveToRecord() }, 'Save answers'),
@@ -145,7 +162,10 @@ export function renderInterview(main, ctx) {
     }
     const p = progress(questions, data);
     progressText.textContent = `${p.done} of ${p.total} answered`;
-    progressFill.style.width = (p.total ? Math.round((p.done / p.total) * 100) : 0) + '%';
+    const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+    progressFill.style.width = pct + '%';
+    progressBar.setAttribute('aria-valuenow', String(pct));
+    progressBar.setAttribute('aria-valuetext', `${p.done} of ${p.total} answered`);
     updatePreview();
   }
   function make(q) {
@@ -176,7 +196,12 @@ export function renderInterview(main, ctx) {
   }, 250);
 
   /* ---------- records ---------- */
-  function loadFromRecord() {
+  async function okToReplace() {
+    if (!dirty) return true;
+    return confirm('Replace the answers you have entered here? Unsaved changes will be lost.', { okLabel: 'Replace', danger: true });
+  }
+  async function loadFromRecord() {
+    if (!(await okToReplace())) return;
     const recs = store.records.list();
     if (!recs.length) { toast('No saved records yet'); return; }
     const list = el('div.picker-list', recs.map((r) => el('button', { type: 'button', onClick: () => { m.close(); useRecord(r); } }, el('span', r.name), el('span.muted.small', new Date(r.updatedAt).toLocaleDateString()))));
@@ -197,12 +222,12 @@ export function renderInterview(main, ctx) {
       const suggested = `${name} — ${new Date().toLocaleDateString()}`;
       const n = await prompt('Name this record (client or matter)', { title: 'Save to record', value: suggested });
       if (n == null) return false;
-      record = store.newRecord({ name: n.trim() || suggested, data: JSON.parse(JSON.stringify(data)) });
+      record = store.newRecord({ name: n.trim() || suggested, data: pruneEmpty(data) });
       recordId = record.id;
       recordLabel.textContent = record.name;
       history.replaceState(null, '', `#${hashBase}?record=${record.id}`);
     } else {
-      store.records.update(record.id, { data: JSON.parse(JSON.stringify(data)) });
+      store.records.update(record.id, { data: pruneEmpty(data) });
     }
     dirty = false;
     if (!quiet) toast('Answers saved', 'ok');
@@ -237,7 +262,7 @@ export function renderInterview(main, ctx) {
       errSummary.appendChild(el('div', `${errors.size} answer${errors.size === 1 ? ' needs' : 's need'} attention before generating:`));
       for (const [path, msg] of errors) {
         const q = ownerOf(path, questions);
-        errSummary.appendChild(el('div', { onClick: () => { const n = elems.get(q ? q.path : path); if (n) { n.scrollIntoView({ behavior: 'smooth', block: 'center' }); const i = n.querySelector('input,select,textarea,button'); if (i) i.focus(); } } }, `• ${q ? q.label : path}: ${msg}`));
+        errSummary.appendChild(el('div', { onClick: () => { const n = elems.get(q ? q.path : path); if (n) { n.scrollIntoView({ behavior: 'smooth', block: 'center' }); const i = n.querySelector('.invalid input, .invalid select, .invalid textarea, .invalid button, input, select, textarea, button'); if (i) i.focus(); } } }, `• ${labelOf(path, q)}: ${msg}`));
       }
       // re-render affected nodes with error state
       for (const [path] of errors) {
@@ -253,15 +278,18 @@ export function renderInterview(main, ctx) {
     navigate(`${outputBase}?record=${record.id}`);
   }
 
+  /** Human label for a (possibly nested) error path: "Executor — Full name". */
+  function labelOf(path, q) {
+    if (!q) return path;
+    const g = genericPath(path);
+    if (q.path === g) return q.label || q.path;
+    const rel = g.startsWith(q.path + '[].') ? g.slice(q.path.length + 3) : g.startsWith(q.path + '.') ? g.slice(q.path.length + 1) : g;
+    const f = (q.itemFields || []).find((x) => itemFieldName(x, q.path) === rel);
+    return `${q.label || q.path} — ${f ? f.label || rel : rel}`;
+  }
+
   window.onbeforeunload = () => (dirty ? true : undefined);
   refresh();
   const first = qHost.querySelector('input,select,textarea,button');
   if (first) first.focus();
-}
-
-function setDefault(data, path, value) {
-  const segs = path.split('.');
-  let cur = data;
-  for (let i = 0; i < segs.length - 1; i++) { if (typeof cur[segs[i]] !== 'object' || cur[segs[i]] == null) cur[segs[i]] = {}; cur = cur[segs[i]]; }
-  cur[segs[segs.length - 1]] = value;
 }

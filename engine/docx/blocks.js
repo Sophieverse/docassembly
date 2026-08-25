@@ -15,7 +15,8 @@
 
 const ALIGN_RE = /^>(center|right|justify|left|title)(?:[ \t]+|$)/;
 const HEADING_RE = /^(#{1,3})[ \t]+(.*)$/;
-const DECIMAL_RE = /^(?:\d+|[a-z]|[ivx]+)[.)][ \t]+(.*)$/;
+const DECIMAL_RE = /^\d+[.)][ \t]+(.*)$/;
+const ALPHA_RE = /^(?:[a-z]|[ivx]+)[.)][ \t]+(.*)$/; // only a list marker when indented (so prose like "a. b" / "i. e." stays prose)
 const BULLET_RE = /^[-*][ \t]+(.*)$/;
 const SEP_CELL_RE = /^:?-{1,}:?$/;
 const ESCAPABLE = '\\*_#|>-';
@@ -37,6 +38,15 @@ export function parseInline(src) {
     buf = '';
   };
   const MARKERS = [['**', 'bold'], ['__', 'underline'], ['*', 'italic']];
+  const positions = markerPositions(src); // O(n) once per line instead of rescanning for a closer at every marker
+  const nextPos = { '**': 0, '__': 0, '*': 0 };
+  const hasCloser = (m, from) => {
+    const arr = positions[m];
+    let k = nextPos[m];
+    while (k < arr.length && arr[k] < from) k++;
+    nextPos[m] = k;
+    return k < arr.length;
+  };
   let i = 0;
   while (i < src.length) {
     const ch = src[i];
@@ -46,11 +56,17 @@ export function parseInline(src) {
       const stop = end < 0 ? src.length : end + 2;
       buf += src.slice(i, stop); i = stop; continue;
     }
+    if (ch === '_' && src[i + 1] === '_' && src[i + 2] === '_') { // a rule/signature line: literal
+      let j = i; while (src[j] === '_') j++;
+      buf += src.slice(i, j); i = j; continue;
+    }
     let matched = false;
     for (const [m, flag] of MARKERS) {
       if (!src.startsWith(m, i)) continue;
       if (state[flag]) { flush(); state[flag] = false; i += m.length; matched = true; break; }
-      if (hasCloser(src, i + m.length, m)) { flush(); state[flag] = true; i += m.length; matched = true; break; }
+      const after = src[i + m.length];
+      const canOpen = after !== undefined && !/\s/.test(after) && hasCloser(m, i + m.length);
+      if (canOpen) { flush(); state[flag] = true; i += m.length; matched = true; break; }
       // unmatched: literal, and (for '**') don't let the inner '*' re-match
       buf += m; i += m.length; matched = true; break;
     }
@@ -61,17 +77,25 @@ export function parseInline(src) {
   return runs.map(cleanRun);
 }
 
-function hasCloser(src, from, m) {
-  let i = from;
+/** Positions of each marker that may act as a closer, skipping escapes, {[ ]} fields and runs of 3+ underscores. */
+function markerPositions(src) {
+  const out = { '**': [], '__': [], '*': [] };
+  let i = 0;
   while (i < src.length) {
-    if (src[i] === '\\') { i += 2; continue; }
-    if (src[i] === '{' && src[i + 1] === '[') { const e = src.indexOf(']}', i + 2); i = e < 0 ? src.length : e + 2; continue; }
-    if (src.startsWith(m, i)) return true;
-    // avoid treating the first '*' of a '**' as an italic closer
-    if (m === '*' && src.startsWith('**', i)) { i += 2; continue; }
+    const ch = src[i];
+    if (ch === '\\') { i += 2; continue; }
+    if (ch === '{' && src[i + 1] === '[') { const e = src.indexOf(']}', i + 2); i = e < 0 ? src.length : e + 2; continue; }
+    if (ch === '_' && src[i + 1] === '_') {
+      if (src[i + 2] === '_') { while (src[i] === '_') i++; continue; }
+      out['__'].push(i); i += 2; continue;
+    }
+    if (ch === '*') {
+      if (src[i + 1] === '*') { out['**'].push(i); i += 2; continue; } // '**' is never an italic closer
+      out['*'].push(i);
+    }
     i++;
   }
-  return false;
+  return out;
 }
 
 function cleanRun(r) {
@@ -115,26 +139,31 @@ function parseLine(line) {
 
   const lead = /^ */.exec(rest)[0].length;
   const level = Math.floor(lead / 2);
-  rest = rest.slice(lead);
+  const unindented = rest.slice(lead);
 
-  let m = ALIGN_RE.exec(rest);
+  let m = ALIGN_RE.exec(unindented);
   if (m) {
     if (m[1] === 'title') extra.style = 'Title';
     else extra.align = m[1];
-    rest = rest.slice(m[0].length);
+    rest = unindented.slice(m[0].length);
+  } else if (unindented[0] === '\\' && unindented.length > 1 && !ESCAPABLE.includes(unindented[1])) {
+    return para(parseInline(unindented.slice(1)), extra); // escaped line start
+  } else {
+    // leading spaces only mean nesting for list items; a plain paragraph keeps them (Word preserves leading spaces)
+    if ((m = DECIMAL_RE.exec(unindented))) return para(parseInline(m[1]), { ...extra, numbering: { kind: 'decimal', level } });
+    if (level >= 1 && (m = ALPHA_RE.exec(unindented))) return para(parseInline(m[1]), { ...extra, numbering: { kind: 'decimal', level } });
+    if ((m = BULLET_RE.exec(unindented))) return para(parseInline(m[1]), { ...extra, numbering: { kind: 'bullet', level } });
+    if ((m = HEADING_RE.exec(unindented))) { extra.style = 'Heading' + m[1].length; return para(parseInline(m[2]), extra); }
+    return para(parseInline(rest), extra);
   }
-  if (rest[0] === '\\' && rest.length > 1 && !ESCAPABLE.includes(rest[1])) return para(parseInline(rest.slice(1)), extra); // escaped line start
+  if (rest[0] === '\\' && rest.length > 1 && !ESCAPABLE.includes(rest[1])) return para(parseInline(rest.slice(1)), extra);
   if ((m = HEADING_RE.exec(rest))) {
     extra.style = 'Heading' + m[1].length;
     return para(parseInline(m[2]), extra);
   }
-  if ((m = DECIMAL_RE.exec(rest))) {
-    const lvl = /^\d/.test(rest) ? level : Math.max(level, 1);
-    return para(parseInline(m[1]), { ...extra, numbering: { kind: 'decimal', level: lvl } });
-  }
-  if ((m = BULLET_RE.exec(rest))) {
-    return para(parseInline(m[1]), { ...extra, numbering: { kind: 'bullet', level } });
-  }
+  if ((m = DECIMAL_RE.exec(rest))) return para(parseInline(m[1]), { ...extra, numbering: { kind: 'decimal', level } });
+  if (level >= 1 && (m = ALPHA_RE.exec(rest))) return para(parseInline(m[1]), { ...extra, numbering: { kind: 'decimal', level } });
+  if ((m = BULLET_RE.exec(rest))) return para(parseInline(m[1]), { ...extra, numbering: { kind: 'bullet', level } });
   return para(parseInline(rest), extra);
 }
 
@@ -168,7 +197,11 @@ function escapeText(s) {
     const ch = s[i];
     if (ch === '{' && s[i + 1] === '[') { const e = s.indexOf(']}', i + 2); const stop = e < 0 ? s.length : e + 2; out += s.slice(i, stop); i = stop - 1; continue; }
     if (ch === '\\' || ch === '*' || ch === '|') out += '\\' + ch;
-    else if (ch === '_' && s[i + 1] === '_') out += '\\_';
+    else if (ch === '_' && s[i + 1] === '_') {
+      let j = i; while (s[j] === '_') j++;
+      if (j - i >= 3) { out += s.slice(i, j); i = j - 1; } // rule / signature line: parser treats it as literal
+      else { out += '\\_'; }
+    }
     else out += ch;
   }
   return out;
@@ -189,8 +222,8 @@ export function runsToInline(runs) {
 }
 
 function escapeLineStart(s) {
-  // a plain paragraph must not be re-read as structure
-  if (/^(#{1,3}[ \t]|>(center|right|justify|left|title)|(\d+|[a-z]|[ivx]+)[.)][ \t]|[-*][ \t]|-{3,}\s*$)/.test(s) || s[0] === '|') return '\\' + s;
+  // a plain paragraph must not be re-read as structure (leading whitespace would become indent / list level)
+  if (/^(#{1,3}[ \t]|>(center|right|justify|left|title)|\d+[.)][ \t]|[-*][ \t]|-{3,}\s*$|\t| +(\d+|[a-z]|[ivx]+)[.)][ \t]| +[-*][ \t]| +#{1,3}[ \t])/.test(s) || s[0] === '|') return '\\' + s;
   return s;
 }
 
@@ -209,13 +242,21 @@ function paragraphToText(p, counters) {
     else {
       counters[level] = (counters[level] || 0) + 1;
       const n = counters[level];
-      mark = (level === 0 ? String(n) : String.fromCharCode(96 + ((n - 1) % 26) + 1)) + '.';
+      // levels cycle decimal / lower letter / lower roman, matching numbering.xml and the HTML preview
+      mark = (level % 3 === 0 ? String(n) : level % 3 === 1 ? String.fromCharCode(96 + ((n - 1) % 26) + 1) : toRoman(n)) + '.';
       if (level === 0) prefix += ''; else prefix += '  '.repeat(level);
       return prefix + mark + ' ' + inline;
     }
     return prefix + '  '.repeat(level) + mark + ' ' + inline;
   }
   return prefix + (inline ? escapeLineStart(inline) : '');
+}
+
+function toRoman(n) {
+  const T = [[1000, 'm'], [900, 'cm'], [500, 'd'], [400, 'cd'], [100, 'c'], [90, 'xc'], [50, 'l'], [40, 'xl'], [10, 'x'], [9, 'ix'], [5, 'v'], [4, 'iv'], [1, 'i']];
+  let out = '';
+  for (const [v, r] of T) while (n >= v) { out += r; n -= v; }
+  return out || '0';
 }
 
 function cellToText(cell) {

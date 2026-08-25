@@ -54,8 +54,8 @@ function lexExpr(src) {
       i = j + 1;
       continue;
     }
-    if (/[A-Za-z_$]/.test(ch)) {
-      const m = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(src.slice(i));
+    if (/[\p{L}_$]/u.test(ch)) {
+      const m = /^[\p{L}_$][\p{L}\p{N}_$]*/u.exec(src.slice(i));
       const w = m[0];
       const lw = w.toLowerCase();
       if (KEYWORDS.has(lw)) toks.push({ t: 'kw', v: lw, pos: i });
@@ -74,6 +74,9 @@ function lexExpr(src) {
 
 // ---------------------------------------------------------------- parser
 
+/** Operators that may follow a filter chain and take its value as their left operand. */
+const CONTINUE_OPS = new Set(['=', '==', '!=', '<>', '<', '<=', '>', '>=', '&&', '||', '?', '+', '-', '*', '/', '%']);
+
 class Parser {
   constructor(src) { this.src = src; this.toks = lexExpr(src); this.i = 0; }
   peek() { return this.toks[this.i]; }
@@ -91,22 +94,32 @@ class Parser {
   }
   pipe() {
     let left = this.ternary();
-    while (this.isOp('|')) {
-      this.next();
-      const nameTok = this.next();
-      if (nameTok.t !== 'id' && nameTok.t !== 'kw') throw new TemplateError(`Expected filter name after "|" in expression: ${this.src}`);
-      const args = [];
-      if (this.isOp(':')) {
+    for (;;) {
+      if (this.isOp('|')) {
         this.next();
-        args.push(this.ternary());
-        while (this.isOp(',') || this.isOp(':')) { this.next(); args.push(this.ternary()); }
+        const nameTok = this.next();
+        if (nameTok.t !== 'id' && nameTok.t !== 'kw') throw new TemplateError(`Expected filter name after "|" in expression: ${this.src}`);
+        const args = [];
+        if (this.isOp(':')) {
+          this.next();
+          args.push(this.ternary());
+          while (this.isOp(',') || this.isOp(':')) { this.next(); args.push(this.ternary()); }
+        }
+        left = { type: 'filter', name: nameTok.v, target: left, args };
+        continue;
       }
-      left = { type: 'filter', name: nameTok.v, target: left, args };
+      // `Children|count > 2`, `Name|trim = ""`, `Flag|default:false and X`: a filter chain followed by a
+      // comparison / logical operator continues with the filtered value as the left operand.
+      const t = this.peek();
+      if (left.type === 'filter' && ((t.t === 'op' && CONTINUE_OPS.has(t.v)) || (t.t === 'kw' && (t.v === 'and' || t.v === 'or')))) {
+        left = this.ternary(left);
+        continue;
+      }
+      return left;
     }
-    return left;
   }
-  ternary() {
-    const cond = this.or();
+  ternary(seed) {
+    const cond = this.or(seed);
     if (this.isOp('?')) {
       this.next();
       const a = this.ternary();
@@ -116,22 +129,22 @@ class Parser {
     }
     return cond;
   }
-  or() {
-    let left = this.and();
+  or(seed) {
+    let left = this.and(seed);
     while (this.isKw('or') || this.isOp('||')) { this.next(); left = { type: 'binary', op: 'or', left, right: this.and() }; }
     return left;
   }
-  and() {
-    let left = this.not();
+  and(seed) {
+    let left = this.not(seed);
     while (this.isKw('and') || this.isOp('&&')) { this.next(); left = { type: 'binary', op: 'and', left, right: this.not() }; }
     return left;
   }
-  not() {
-    if (this.isKw('not')) { this.next(); return { type: 'unary', op: 'not', arg: this.not() }; }
-    return this.equality();
+  not(seed) {
+    if (seed === undefined && this.isKw('not')) { this.next(); return { type: 'unary', op: 'not', arg: this.not() }; }
+    return this.equality(seed);
   }
-  equality() {
-    let left = this.relational();
+  equality(seed) {
+    let left = this.relational(seed);
     for (;;) {
       const t = this.peek();
       if (t.t === 'op' && ['=', '==', '!=', '<>'].includes(t.v)) {
@@ -141,8 +154,8 @@ class Parser {
       } else return left;
     }
   }
-  relational() {
-    let left = this.additive();
+  relational(seed) {
+    let left = this.additive(seed);
     for (;;) {
       const t = this.peek();
       if (t.t === 'op' && ['<', '<=', '>', '>='].includes(t.v)) {
@@ -151,13 +164,13 @@ class Parser {
       } else return left;
     }
   }
-  additive() {
-    let left = this.multiplicative();
+  additive(seed) {
+    let left = this.multiplicative(seed);
     while (this.isOp('+') || this.isOp('-')) { const op = this.next().v; left = { type: 'binary', op, left, right: this.multiplicative() }; }
     return left;
   }
-  multiplicative() {
-    let left = this.unary();
+  multiplicative(seed) {
+    let left = seed !== undefined ? seed : this.unary();
     while (this.isOp('*') || this.isOp('/') || this.isOp('%')) { const op = this.next().v; left = { type: 'binary', op, left, right: this.unary() }; }
     return left;
   }
@@ -234,6 +247,8 @@ export function truthy(v) {
   return true;
 }
 
+const isBlank = (v) => v == null || v === '' || (typeof v === 'number' && Number.isNaN(v));
+
 function isNumeric(v) {
   return (typeof v === 'number' && !Number.isNaN(v)) || (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v)));
 }
@@ -269,7 +284,7 @@ export function valuesEqual(a, b) {
     if (typeof b === 'string') return b.toLowerCase() === String(a);
     return a === b;
   }
-  if (typeof a === 'string' && typeof b === 'string' && !isNumeric(a) && !isDateLike(a)) return a === b;
+  if (typeof a === 'string' && typeof b === 'string') return (isDateLike(a) && isDateLike(b)) ? compareValues(a, b) === 0 : a === b;
   return compareValues(a, b) === 0;
 }
 
@@ -288,7 +303,15 @@ export function createScope(vars, parent = null, prefix = null) {
   return { vars: vars || {}, parent, prefix };
 }
 
-function hasOwn(obj, key) { return obj != null && typeof obj === 'object' && Object.prototype.hasOwnProperty.call(obj, key); }
+function hasOwn(obj, key) { return obj != null && (typeof obj === 'object' || typeof obj === 'function') && Object.prototype.hasOwnProperty.call(obj, key); }
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+/** Own-property read from a registry (functions / methods / namespaces): never resolves inherited members like `constructor` or `valueOf`. */
+function registryGet(reg, name) {
+  if (name == null || UNSAFE_KEYS.has(String(name).toLowerCase())) return undefined;
+  if (hasOwn(reg, name)) return reg[name];
+  const l = String(name).toLowerCase();
+  return hasOwn(reg, l) ? reg[l] : undefined;
+}
 
 /** Case-tolerant property read: exact key, then case-insensitive match. */
 function readProp(obj, key) {
@@ -297,6 +320,7 @@ function readProp(obj, key) {
     if (typeof obj === 'string' && key === 'length') return { found: true, value: obj.length };
     return { found: false, value: undefined };
   }
+  if (UNSAFE_KEYS.has(key.toLowerCase())) return { found: false, value: undefined };
   if (hasOwn(obj, key)) return { found: true, value: obj[key] };
   if (Array.isArray(obj) && key === 'length') return { found: true, value: obj.length };
   if (obj instanceof Date) return { found: false, value: undefined };
@@ -352,8 +376,11 @@ export function listIdentity(ast) {
  * @property {Set<string>} missing     paths that resolved to undefined/blank
  */
 
-/** Create an empty trace object. */
-export function createTrace() { return { referenced: new Set(), missing: new Set() }; }
+/**
+ * Create an empty trace object.
+ * @param {{exhaustive?:boolean}} [opts] exhaustive: keep evaluating the right side of `and` when the left is unanswered
+ */
+export function createTrace(opts) { return { referenced: new Set(), missing: new Set(), exhaustive: !!(opts && opts.exhaustive) }; }
 
 /** Filters/functions whose expression arguments are evaluated per list item. */
 export const LAZY_FILTERS = new Set(['filter', 'where', 'find', 'any', 'all', 'every', 'some', 'sum', 'sort', 'sortby', 'orderby', 'map', 'count', 'group', 'groupby', 'reduce', 'min', 'max']);
@@ -384,6 +411,14 @@ function resolvePath(ast, scope, trace, functions) {
   if (n.type !== 'ident') {
     let v = evalNode(n, scope, trace, functions);
     for (const p of parts) v = readProp(v, p).value;
+    // `Children[0].Name`: trace the concrete path so relevance can ask for that item's field.
+    const base = pathOf(n);
+    if (base && n.type === 'index') {
+      const path = tracedPath(n, scope) + (parts.length ? '.' + parts.join('.') : '');
+      record(trace, 'referenced', path);
+      if (isBlank(v)) record(trace, 'missing', path);
+      return { value: v, path };
+    }
     return { value: v, path: null };
   }
   parts.unshift(n.name);
@@ -391,9 +426,9 @@ function resolvePath(ast, scope, trace, functions) {
   if (!hit) {
     const root = parts[0];
     const lroot = root.toLowerCase();
-    if (parts.length === 1 && typeof functions[root] === 'function') return { value: functions[root](), path: null }; // {[today]}
-    if (namespaces[lroot]) { // date.today etc.
-      let v = namespaces[lroot];
+    if (parts.length === 1 && hasOwn(functions, root) && typeof functions[root] === 'function') return { value: functions[root](), path: null }; // {[today]} (exact case only)
+    if (registryGet(namespaces, lroot)) { // date.today etc.
+      let v = registryGet(namespaces, lroot);
       for (let i = 1; i < parts.length; i++) v = readProp(v, parts[i]).value;
       return { value: v, path: null };
     }
@@ -410,7 +445,7 @@ function resolvePath(ast, scope, trace, functions) {
     path += '.' + parts[i];
     const r = readProp(value, parts[i]);
     if (!r.found) {
-      if (valueMethods[parts[i]] && value != null && typeof value !== 'object') return { value: undefined, path, method: parts[i], receiver: value };
+      if (registryGet(valueMethods, parts[i]) && value != null && typeof value !== 'object') return { value: undefined, path, method: parts[i], receiver: value };
       record(trace, 'referenced', path);
       record(trace, 'missing', path);
       return { value: undefined, path };
@@ -423,7 +458,7 @@ function resolvePath(ast, scope, trace, functions) {
 }
 
 function callFunction(name, args, functions) {
-  const fn = functions[name] || functions[name.toLowerCase()];
+  const fn = registryGet(functions, name);
   if (typeof fn !== 'function') throw new TemplateError(`Unknown function "${name}"`);
   return fn(...args);
 }
@@ -504,7 +539,7 @@ function evalNode(ast, scope, trace, functions) {
     case 'ident':
     case 'member': {
       const r = resolvePath(ast, scope, trace, functions);
-      if (r.method) return valueMethods[r.method](r.receiver); // property-style method e.g. Name.length handled by readProp; others called bare
+      if (r.method) return registryGet(valueMethods, r.method)(r.receiver); // property-style method e.g. Name.length handled by readProp; others called bare
       return r.value;
     }
     case 'index': {
@@ -523,7 +558,12 @@ function evalNode(ast, scope, trace, functions) {
       throw new TemplateError(`Unknown unary operator ${ast.op}`);
     }
     case 'binary': {
-      if (ast.op === 'and') { const l = evalNode(ast.left, scope, trace, functions); if (!truthy(l)) return false; return truthy(evalNode(ast.right, scope, trace, functions)); }
+      if (ast.op === 'and') {
+        const l = evalNode(ast.left, scope, trace, functions);
+        // In exhaustive (relevance) mode an *unanswered* left side does not hide the right side's variables.
+        if (!truthy(l)) { if (trace && trace.exhaustive && isBlank(l)) evalNode(ast.right, scope, trace, functions); return false; }
+        return truthy(evalNode(ast.right, scope, trace, functions));
+      }
       if (ast.op === 'or') { const l = evalNode(ast.left, scope, trace, functions); if (truthy(l)) return true; return truthy(evalNode(ast.right, scope, trace, functions)); }
       const l = evalNode(ast.left, scope, trace, functions);
       const r = evalNode(ast.right, scope, trace, functions);
@@ -562,8 +602,8 @@ function evalNode(ast, scope, trace, functions) {
         // namespace call (date.today()), method call (Name.toUpperCase()), or user function on an object
         const root = callee.object.type === 'ident' ? callee.object.name : null;
         const rootHit = root ? lookup(scope, root) : null;
-        if (root && !rootHit && namespaces[root.toLowerCase()]) {
-          const ns = namespaces[root.toLowerCase()];
+        if (root && !rootHit && registryGet(namespaces, root)) {
+          const ns = registryGet(namespaces, root);
           const fn = readProp(ns, callee.property).value;
           if (typeof fn !== 'function') throw new TemplateError(`Unknown function "${name}"`);
           return fn(...ast.args.map((a) => evalNode(a, scope, trace, functions)));
@@ -572,7 +612,7 @@ function evalNode(ast, scope, trace, functions) {
         const prop = callee.property;
         const own = readProp(recv, prop);
         if (own.found && typeof own.value === 'function') return own.value(...ast.args.map((a) => evalNode(a, scope, trace, functions)));
-        const method = valueMethods[prop] || valueMethods[prop.toLowerCase()];
+        const method = registryGet(valueMethods, prop);
         if (method) {
           if (LAZY_FILTERS.has(prop.toLowerCase()) && isLazyArgs(ast.args)) return evalLazy(prop, recv, ast.args, scope, trace, functions, lazyPrefix(callee.object, scope));
           return method(recv, ...ast.args.map((a) => evalNode(a, scope, trace, functions)));
@@ -589,7 +629,7 @@ function evalNode(ast, scope, trace, functions) {
         return truthy(c) ? evalNode(ast.args[1], scope, trace, functions) : ast.args[2] ? evalNode(ast.args[2], scope, trace, functions) : '';
       }
       const args = ast.args.map((a) => evalNode(a, scope, trace, functions));
-      if (name && typeof (functions[name] || functions[lname]) === 'function') return callFunction(name, args, functions);
+      if (name && typeof registryGet(functions, name) === 'function') return callFunction(name, args, functions);
       const hit = name ? lookup(scope, name) : null;
       if (hit && typeof hit.value === 'function') return hit.value(...args);
       throw new TemplateError(`Unknown function "${name}"`);

@@ -17,6 +17,8 @@ import { TemplateError } from './lexer.js';
  * @property {string} [no]          boolean false text (default "No")
  * @property {string} [missingText] text substituted for missing values (default "")
  * @property {boolean} [strict]     throw on unknown functions / bad expressions instead of warning
+ * @property {boolean} [autoDates]  reformat ISO-looking text ("2026-03-05") as a date (default true)
+ * @property {Object}  [model]      model from model.js; when given, only variables typed `date` are auto-formatted
  */
 
 /**
@@ -29,7 +31,11 @@ export function formatValue(v, opts = {}) {
   if (typeof v === 'boolean') return v ? (opts.yes ?? 'Yes') : (opts.no ?? 'No');
   if (v instanceof Date) return formatDate(v, opts.dateFormat || 'long');
   if (typeof v === 'number') return Number.isNaN(v) ? '' : String(v);
-  if (typeof v === 'string') return isDateLike(v) && /^\d{4}-\d{1,2}-\d{1,2}$/.test(v.trim()) ? formatDate(v, opts.dateFormat || 'long') : v;
+  if (typeof v === 'string') {
+    if (opts.autoDates === false || !/^\d{4}-\d{1,2}-\d{1,2}$/.test(v.trim())) return v;
+    const f = formatDate(v, opts.dateFormat || 'long');
+    return f === '' ? v : f; // unparseable ("2026-13-45") → print as typed rather than vanish
+  }
   if (Array.isArray(v)) return v.map((x) => formatValue(x, opts)).filter((s) => s !== '').join(', ');
   if (typeof v === 'object') {
     const label = v.FullName ?? v.fullName ?? v.Name ?? v.name ?? v.Title ?? v.title;
@@ -89,6 +95,14 @@ export function render(ast, data, options = {}) {
     return { value, missing: local.missing };
   };
 
+  // With a model, only `date`-typed variables get ISO text reformatted as a date.
+  const fieldOpts = (node, value) => {
+    if (!options.model || !options.model.variables || typeof value !== 'string') return options;
+    const p = pathOf(node.expr);
+    const def = p ? options.model.variables[p] : null;
+    return def && def.type !== 'date' && def.type !== 'computed' ? { ...options, autoDates: false } : options;
+  };
+
   const out = [];
   const renderBody = (body, scope) => {
     for (const node of body) renderNode(node, scope);
@@ -100,7 +114,7 @@ export function render(ast, data, options = {}) {
       case 'comment': break;
       case 'field': {
         const { value, missing } = evalIn(node.expr, scope, node.src, node);
-        const text = formatValue(value, options);
+        const text = formatValue(value, fieldOpts(node, value));
         if (text === '' && (value == null || value === '')) {
           const p0 = pathOf(node.expr);
           const paths = missing.size ? [...missing] : p0 && p0.startsWith('_') ? [] : [p0 || node.src];

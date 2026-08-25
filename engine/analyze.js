@@ -128,7 +128,9 @@ export function analyze(ast) {
    * @param {string} p raw dotted path from an expression
    * @param {Array<{prefix:string, itemName?:string}>} lists
    */
-  const resolve = (p, lists) => {
+  const resolve = (raw, lists) => {
+    // `Children[0].Name` is a use of the item field Children[].Name; bare `Children[0]` is a use of the list.
+    const p = raw.replace(/\[\d+\]/g, '[]').replace(/\[\]$/, '');
     const segs = p.split('.');
     if (segs[0].startsWith('_')) return null; // _index etc.
     for (let i = lists.length - 1; i >= 0; i--) {
@@ -171,9 +173,10 @@ export function analyze(ast) {
         else if (NUMBER_FILTERS.has(f)) setType(info, 'number');
         else if (DATE_FILTERS.has(f)) setType(info, 'date');
         else if (f === 'format') {
-          const a0 = n.args[0];
+          const a0 = n.args[0], a1 = n.args[1];
           const arg = a0 && a0.type === 'literal' ? String(a0.value) : '';
           if (/^[#9,0$]*[.]?[#90]*%?$/.test(arg) && /[#90]/.test(arg)) setType(info, 'number');
+          else if (a1 && a1.type === 'literal' && typeof a1.value === 'string' && a0 && a0.type === 'literal' && typeof a0.value === 'string') setType(info, 'boolean'); // format:"yes":"no"
           else setType(info, 'date');
         }
         else if (GENDER_FILTERS.has(f)) { setType(info, 'selection'); info.options = ['male', 'female', 'neutral']; }
@@ -203,7 +206,8 @@ export function analyze(ast) {
         }
       }
     });
-    if (context === 'condition' && isBare) setType(info, 'boolean');
+    if (context === 'condition' && isBare) { if (info.typeRank < TYPE_RANK.boolean) info.bareCond = true; setType(info, 'boolean'); }
+    else if (context === 'field' && !filters.length && !calls.length && (exprAst.type === 'ident' || exprAst.type === 'member') && pathOf(exprAst) === raw) info.plainField = true;
     // name hints (lower priority than explicit filter evidence)
     if (info.typeRank < 3) {
       for (const [re, t] of NAME_HINTS) {
@@ -246,8 +250,94 @@ export function analyze(ast) {
   };
   walkBody(ast.body, [], []);
 
-  for (const v of variables.values()) { delete v.typeRank; v.contexts = [...v.contexts]; }
-  return { variables, structure };
+  const { annotations, annotationErrors } = collectAnnotations(ast);
+
+  for (const v of variables.values()) {
+    // `{[if Notes]}{[Notes]}{[end if]}`: a bare condition on a variable that is also printed is a
+    // "has a value" check, not a Yes/No question.
+    if (v.bareCond && v.plainField && v.inferredType === 'boolean' && !/^(Is|Has|Can|Should|Will|Does|Did|Wants|Needs|Includes?)[A-Z_]/.test(v.name)) {
+      v.inferredType = 'text'; v.typeRank = -1;
+      for (const [re, t] of NAME_HINTS) if (re.test(v.name)) { setType(v, t, Math.max(TYPE_RANK[t] ?? 0, 2)); break; }
+    }
+    delete v.typeRank; delete v.bareCond; delete v.plainField; v.contexts = [...v.contexts];
+  }
+  return { variables, structure, annotations, annotationErrors };
+}
+
+/** Annotation keys understood in `{[# @key Path: value]}` comments. */
+export const ANNOTATION_KEYS = ['label', 'help', 'options', 'default', 'required', 'optional', 'type', 'min', 'max', 'minlength', 'maxlength', 'pattern', 'validate', 'message', 'formula'];
+const ANNOTATION_FIELD = { minlength: 'minLength', maxlength: 'maxLength' };
+
+/**
+ * Parse one `@key Path: value` line. Returns null when the line is not an annotation.
+ * @param {string} line
+ * @returns {{key:string, path:string, value:string}|{error:string}|null}
+ */
+export function parseAnnotationLine(line) {
+  const m = /^@([A-Za-z]+)\s+([\p{L}_$][\p{L}\p{N}_$]*(?:\[\]|\.[\p{L}_$][\p{L}\p{N}_$]*)*)\s*(?::\s*(.*))?$/su.exec(line.trim());
+  if (!m) return /^@[A-Za-z]+\b/.test(line.trim()) ? { error: `Cannot read annotation "${line.trim()}" (expected @key Path: value)` } : null;
+  const key = m[1].toLowerCase();
+  if (!ANNOTATION_KEYS.includes(key)) return { error: `Unknown annotation @${m[1]} (known: ${ANNOTATION_KEYS.map((k) => '@' + k).join(', ')})` };
+  return { key, path: m[2], value: (m[3] || '').trim() };
+}
+
+/**
+ * Collect `@` annotations from every comment in the AST. One annotation per line;
+ * a comment may hold several. Values are typed: numbers for @min/@max (ISO dates stay strings),
+ * arrays for @options, `{expr, message}` for @validate, booleans for @required/@optional.
+ * @param {Object} ast
+ * @returns {{annotations: Map<string, Object>, annotationErrors: Array<{message:string,line:number,col:number}>}}
+ */
+export function collectAnnotations(ast) {
+  const annotations = new Map();
+  const annotationErrors = [];
+  const ensure = (path) => { if (!annotations.has(path)) annotations.set(path, {}); return annotations.get(path); };
+  const visit = (nodes) => {
+    for (const n of nodes) {
+      if (n.type === 'comment') {
+        const lines = String(n.value || '').split(/\r?\n/);
+        lines.forEach((line, i) => {
+          const a = parseAnnotationLine(line);
+          if (!a) return;
+          if (a.error) { annotationErrors.push({ message: a.error, line: n.line + i, col: n.col }); return; }
+          const target = ensure(a.path);
+          switch (a.key) {
+            case 'required': target.required = a.value === '' ? true : !/^(false|no|0|off)$/i.test(a.value); break;
+            case 'optional': target.required = false; break;
+            case 'options': target.options = a.value.split('|').map((s) => s.trim()).filter(Boolean); break;
+            case 'min': case 'max': target[a.key] = /^-?\d+(\.\d+)?$/.test(a.value) ? Number(a.value) : a.value; break;
+            case 'minlength': case 'maxlength': {
+              const num = Number(a.value);
+              if (!Number.isInteger(num) || num < 0) { annotationErrors.push({ message: `@${a.key} ${a.path}: expected a whole number, got "${a.value}"`, line: n.line + i, col: n.col }); break; }
+              target[ANNOTATION_FIELD[a.key]] = num; break;
+            }
+            case 'pattern':
+              try { new RegExp(a.value); target.pattern = a.value; }
+              catch (e) { annotationErrors.push({ message: `@pattern ${a.path}: invalid regular expression: ${e.message}`, line: n.line + i, col: n.col }); }
+              break;
+            case 'validate': {
+              const idx = a.value.indexOf('::');
+              target.validate = (idx === -1 ? a.value : a.value.slice(0, idx)).trim();
+              if (idx !== -1) target.message = a.value.slice(idx + 2).trim();
+              if (!target.validate) annotationErrors.push({ message: `@validate ${a.path}: missing expression`, line: n.line + i, col: n.col });
+              break;
+            }
+            case 'type': {
+              const t = a.value.toLowerCase();
+              if (!['text', 'longtext', 'number', 'currency', 'date', 'boolean', 'selection', 'multiselect', 'object', 'list', 'computed', 'email', 'phone'].includes(t)) { annotationErrors.push({ message: `@type ${a.path}: unknown type "${a.value}"`, line: n.line + i, col: n.col }); break; }
+              target.type = t; break;
+            }
+            case 'formula': target.formula = a.value; target.type = 'computed'; break;
+            default: target[a.key] = a.value; break; // label, help, default, message
+          }
+        });
+      }
+      if (n.type === 'if') { for (const b of n.branches) visit(b.body); if (n.elseBody) visit(n.elseBody); }
+      if (n.type === 'list') visit(n.body);
+    }
+  };
+  visit(ast.body || []);
+  return { annotations, annotationErrors };
 }
 
 function walkExpr(n, fn) {
@@ -258,11 +348,16 @@ function walkExpr(n, fn) {
     case 'index': walkExpr(n.object, fn); walkExpr(n.index, fn); break;
     case 'unary': walkExpr(n.arg, fn); break;
     case 'binary': walkExpr(n.left, fn); walkExpr(n.right, fn); break;
+    case 'ternary': walkExpr(n.cond, fn); walkExpr(n.a, fn); walkExpr(n.b, fn); break;
     case 'call': n.args.forEach((a) => walkExpr(a, fn)); break;
     case 'filter': walkExpr(n.target, fn); n.args.forEach((a) => walkExpr(a, fn)); break;
     default: break;
   }
 }
+
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+/** A property name that is safe to read/write on plain data objects. */
+export function isSafeKey(key) { return !UNSAFE_KEYS.has(String(key).toLowerCase()); }
 
 const isBlankValue = (v) => v === undefined || v === null || v === '' || (typeof v === 'number' && Number.isNaN(v));
 
@@ -274,7 +369,7 @@ export function getPath(data, path) {
   for (const seg of String(path).split('.')) {
     const m = /^(.+?)\[(\d+)\]$/.exec(seg);
     const key = m ? m[1] : seg;
-    if (v == null || typeof v !== 'object') return undefined;
+    if (v == null || typeof v !== 'object' || !isSafeKey(key)) return undefined;
     let val = Object.prototype.hasOwnProperty.call(v, key) ? v[key] : undefined;
     if (val === undefined) { const k = Object.keys(v).find((x) => x.toLowerCase() === key.toLowerCase()); if (k !== undefined) val = v[k]; }
     if (m) val = Array.isArray(val) ? val[+m[2]] : undefined;
@@ -323,7 +418,7 @@ export function relevantVariables(ast, data, options = {}) {
 
   // Evaluate an expression in scope; return {value, referenced paths, unansweredPaths}
   const evalIn = (expr, scope) => {
-    const trace = createTrace();
+    const trace = createTrace({ exhaustive: true });
     let value;
     try { value = evalExpr(expr, scope, trace, fns); } catch { value = undefined; }
     const missing = [...trace.missing].filter((p) => isLeaf(generic(p)) && !p.split('.').some((s) => s.startsWith('_')));
@@ -457,7 +552,7 @@ export function relevantVariables(ast, data, options = {}) {
  * @param {Object} ast
  * @param {Object} data
  * @param {Object} [model] from model.js (custom labels/types/options); optional
- * @returns {Array<{path:string,label:string,type:string,required:boolean,options?:string[],listPath?:string,answered:boolean,help?:string}>}
+ * @returns {Array<{path:string,label:string,type:string,required:boolean,options?:string[],listPath?:string,answered:boolean,help?:string,min?:number|string,max?:number|string,minLength?:number,maxLength?:number,pattern?:string,default?:any}>}
  */
 export function questionnaire(ast, data, model) {
   const analysis = analyze(ast);
@@ -483,6 +578,10 @@ export function questionnaire(ast, data, model) {
     if (options && options.length) q.options = options;
     if (info && info.listPath) q.listPath = info.listPath;
     if (def && def.help) q.help = def.help;
+    if (def) {
+      for (const k of ['min', 'max', 'minLength', 'maxLength', 'pattern', 'default']) if (def[k] !== undefined && def[k] !== null && def[k] !== '') q[k] = def[k];
+      if (def.fromTemplate && Object.keys(def.fromTemplate).length) q.fromTemplate = { ...def.fromTemplate };
+    }
     out.push(q);
   }
   return out;

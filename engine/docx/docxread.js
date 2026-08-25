@@ -14,7 +14,10 @@ import { blocksToText } from './blocks.js';
 const ENTITIES = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" };
 export function unescapeXml(s) {
   return s.replace(/&(#x[0-9a-fA-F]+|#\d+|\w+);/g, (m, e) => {
-    if (e[0] === '#') return String.fromCodePoint(e[1] === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10));
+    if (e[0] === '#') {
+      const cp = e[1] === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return cp >= 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : m; // out-of-range entity: keep raw, never throw
+    }
     return e in ENTITIES ? ENTITIES[e] : m;
   });
 }
@@ -32,12 +35,22 @@ export function parseXml(xml) {
     const lt = xml.indexOf('<', i);
     if (lt < 0) { pushText(xml.slice(i)); break; }
     if (lt > i) pushText(xml.slice(i, lt));
-    if (xml.startsWith('<!--', lt)) { i = xml.indexOf('-->', lt) + 3; continue; }
-    if (xml.startsWith('<?', lt)) { i = xml.indexOf('?>', lt) + 2; continue; }
-    if (xml.startsWith('<![CDATA[', lt)) { const e = xml.indexOf(']]>', lt); pushText(xml.slice(lt + 9, e), true); i = e + 3; continue; }
-    if (xml.startsWith('<!', lt)) { i = xml.indexOf('>', lt) + 1; continue; }
+    // Unterminated comment / PI / CDATA / doctype: stop parsing (never loop). indexOf -1 must not reset i.
+    let skip = null;
+    if (xml.startsWith('<!--', lt)) skip = ['-->', 4];
+    else if (xml.startsWith('<?', lt)) skip = ['?>', 2];
+    else if (xml.startsWith('<![CDATA[', lt)) skip = [']]>', 9];
+    else if (xml.startsWith('<!', lt)) skip = ['>', 2];
+    if (skip) {
+      const e = xml.indexOf(skip[0], lt + skip[1]);
+      if (e < 0) break;
+      if (skip[1] === 9) pushText(xml.slice(lt + 9, e), true);
+      i = e + skip[0].length;
+      continue;
+    }
     let j = lt + 1, q = null;
     while (j < n) { const c = xml[j]; if (q) { if (c === q) q = null; } else if (c === '"' || c === "'") q = c; else if (c === '>') break; j++; }
+    if (j >= n) break; // tag never closed
     const tag = xml.slice(lt + 1, j);
     i = j + 1;
     if (tag[0] === '/') { if (stack.length > 1) stack.pop(); continue; }
@@ -88,6 +101,11 @@ function runText(r) {
 
 const CONTAINERS = new Set(['w:ins', 'w:hyperlink', 'w:smartTag', 'w:fldSimple', 'w:sdt', 'w:sdtContent', 'w:customXml', 'w:dir', 'w:bdo']);
 
+/** mc:AlternateContent: we understand none of the "Requires" namespaces, so per the MCE spec take mc:Fallback (else Choice). */
+function alternate(node) {
+  return child(node, 'mc:Fallback') || child(node, 'mc:Choice') || { children: [] };
+}
+
 function collectRuns(node, out) {
   for (const c of node.children) {
     if (c.name === 'w:r') {
@@ -95,6 +113,7 @@ function collectRuns(node, out) {
       const text = runText(c);
       if (text.length) out.push({ text, ...runProps(child(c, 'w:rPr')) });
     } else if (CONTAINERS.has(c.name)) collectRuns(c, out); // skips w:del
+    else if (c.name === 'mc:AlternateContent') collectRuns(alternate(c), out);
   }
   return out;
 }
@@ -171,9 +190,16 @@ function parseParagraph(p, ctx) {
       if (left >= 360) para.indent = Math.max(1, Math.round(left / 720));
     }
   }
+  // The Title style is centered by definition (docxwrite also writes it directly for importers that ignore styles.xml).
+  if (para.style === 'Title' && para.align === 'center') para.align = 'left';
   const text = runs.map((r) => r.text).join('');
+  const sect = pPr && child(pPr, 'w:sectPr');
+  if (sect && !text.length) { // a section break, not content: page break unless continuous; dropped when it ends the document
+    const type = child(sect, 'w:type')?.attrs['w:val'];
+    return type === 'continuous' ? [] : [{ type: 'pagebreak', _section: true }];
+  }
   if (raw.pageBreak && !text.length) return [{ type: 'pagebreak' }];
-  if (raw.pageBreak) return [{ type: 'pagebreak' }, para];
+  if (raw.pageBreak || (pPr && isOn(child(pPr, 'w:pageBreakBefore')))) return [{ type: 'pagebreak' }, para];
   return [para];
 }
 
@@ -183,6 +209,7 @@ function parseBlocks(container, ctx) {
     if (c.name === 'w:p') out.push(...parseParagraph(c, ctx));
     else if (c.name === 'w:tbl') out.push({ type: 'table', rows: childrenNamed(c, 'w:tr').map((tr) => childrenNamed(tr, 'w:tc').map((tc) => parseBlocks(tc, ctx))) });
     else if (c.name === 'w:sdt' || c.name === 'w:sdtContent' || c.name === 'w:customXml') out.push(...parseBlocks(c, ctx));
+    else if (c.name === 'mc:AlternateContent') out.push(...parseBlocks(alternate(c), ctx));
   }
   return out;
 }
@@ -224,12 +251,20 @@ export function parseDocumentXml(xml, numberingXml, stylesXml) {
   const document = child(parseXml(xml), 'w:document');
   const body = document && child(document, 'w:body');
   if (!body) throw new Error('docxread: w:body not found');
-  return parseBlocks(body, { numKinds: numberingKinds(numberingXml), styleNames: styleNameMap(stylesXml) });
+  const blocks = parseBlocks(body, { numKinds: numberingKinds(numberingXml), styleNames: styleNameMap(stylesXml) });
+  while (blocks.length && blocks[blocks.length - 1]._section) blocks.pop(); // final section break ends nothing
+  for (const b of blocks) delete b._section;
+  // Word requires an (empty) paragraph after a trailing table; it is not content, so drop it.
+  const last = blocks[blocks.length - 1];
+  if (blocks.length >= 2 && blocks[blocks.length - 2].type === 'table' && last.type === 'paragraph' && !last.runs.length && !last.numbering) blocks.pop();
+  return blocks;
 }
 
 /** Read a .docx: returns { text, blocks }. */
 export async function readDocx(bytes) {
-  const zip = readZip(bytes);
+  if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array(bytes);
+  let zip;
+  try { zip = readZip(bytes); } catch (e) { throw new Error('docxread: not a .docx file — ' + e.message.replace(/^zipread: /, '')); }
   const dec = new TextDecoder();
   const part = async (name) => { const e = zip.get(name); return e ? dec.decode(await e.bytes()) : null; };
   const docXml = await part('word/document.xml');

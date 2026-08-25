@@ -16,6 +16,9 @@ export const text = `{[# =======================================================
      IsLitigation                                     -> costs / experts clause
      Client.IsEntity                                  -> signature block & addressee
      Firm.State (California / New York / other)       -> state-specific notices
+   Section numbers are computed so removed sections leave no gaps.
+   Layout convention: an optional block starts with a blank line INSIDE the
+   {[if]} so that removing it never leaves a double blank line behind.
    ============================================================ ]}
 >right {[Firm.Name]}
 >right {[Firm.Address.Street]}
@@ -37,7 +40,7 @@ Attn: {[Client.ContactName]}, {[Client.ContactTitle|default:"Authorized Represen
 
 **Re: Engagement of {[Firm.Name]} — {[MatterName]}**
 
-Dear {[if Client.IsEntity]}{[Client.ContactName]}{[else]}{[Client.Salutation|default:Client.FullName]}{[end if]}:
+Dear {[if Client.IsEntity]}{[Client.Salutation|default:Client.ContactName]}{[else]}{[Client.Salutation|default:Client.FullName]}{[end if]}:
 
 Thank you for selecting {[Firm.Name]} (the "Firm") to represent {[if Client.IsEntity]}{[Client.FullName]} (the "Client"){[else]}you (the "Client"){[end if]}{[if count(AdditionalClients) > 0]}, together with {[list AdditionalClients]}{[FullName]}{[_punc]}{[end list]} (collectively, the "Clients"){[end if]} in connection with the matter described below. This letter confirms the terms of our engagement. Please review it carefully; if it accurately reflects your understanding, sign and return a copy to us.
 
@@ -46,7 +49,7 @@ Thank you for selecting {[Firm.Name]} (the "Firm") to represent {[if Client.IsEn
 The Firm will represent the Client in the following matter (the "Matter"): {[MatterDescription]}
 
 {[if IsLitigation]}
-The Matter involves {[if LitigationRole = "Plaintiff"]}prosecuting{[else]}defending{[end if]} litigation{[if Court]} in the {[Court]}{[end if]}. Our representation includes pre-suit investigation, pleadings, discovery, motion practice, and trial. Unless we agree otherwise in writing, the engagement does **not** include any appeal, post-judgment collection, or enforcement proceedings.
+The Matter involves {[if LitigationRole = "Plaintiff"]}prosecuting{[else if LitigationRole = "Defendant"]}defending{[else]}[DRAFTER: LitigationRole must be Plaintiff or Defendant]{[end if]} litigation{[if Court]} in the {[Court]}{[end if]}. Our representation includes pre-suit investigation, pleadings, discovery, motion practice, and trial. Unless we agree otherwise in writing, the engagement does **not** include any appeal, post-judgment collection, or enforcement proceedings.
 {[else]}
 Our representation is limited to the Matter as described above. It does not include litigation, tax advice, or any other matter unless we agree in writing to expand the scope.
 {[end if]}
@@ -59,14 +62,14 @@ Our representation is limited to the Matter as described above. It does not incl
 {[else if FeeType = "Flat"]}
 **Flat fee.** The Firm will handle the Matter for a flat fee of {[FlatFee|currency]} ({[FlatFee|dollars]}). The flat fee covers the services described in Section 1 only; work outside that scope will be billed at our standard hourly rates after written agreement. {[if FlatFeeEarnedOnReceipt]}The flat fee is earned upon receipt and will be deposited into the Firm's operating account; however, if the engagement ends before the work is completed, you may be entitled to a refund of any unearned portion.{[else]}The flat fee will be held in the Firm's client trust account and withdrawn as earned at the milestones described in Schedule A.{[end if]}
 {[else if FeeType = "Contingency"]}
-**Contingency fee.** The Firm will receive {[ContingencyPercent]}% ({[ContingencyPercent|words]} percent) of any gross recovery obtained by settlement, judgment, or award{[if ContingencyPercentTrial > ContingencyPercent]}, increasing to {[ContingencyPercentTrial]}% if the Matter proceeds to trial or arbitration hearing{[end if]}. "Gross recovery" means the total amount recovered before deduction of costs. **If there is no recovery, you will owe no attorney's fees.** You will remain responsible for costs as described in Section 3.
+**Contingency fee.** The Firm will receive {[ContingencyPercent]}% ({[ContingencyPercent|words]} percent) of any gross recovery obtained by settlement, judgment, or award{[if ContingencyPercentTrial > ContingencyPercent]}, increasing to {[ContingencyPercentTrial]}% ({[ContingencyPercentTrial|words]} percent) if the Matter proceeds to trial or arbitration hearing{[end if]}. "Gross recovery" means the total amount recovered before deduction of costs. **If there is no recovery, you will owe no attorney's fees.** You will remain responsible for costs as described in Section 3.
 {[else if FeeType = "Hybrid"]}
-**Hybrid fee.** The Firm will bill at a reduced hourly rate of {[HourlyRate|currency]} per hour, plus a contingent fee equal to {[ContingencyPercent]}% of any gross recovery. The reduced hourly component is payable regardless of outcome; the contingent component is payable only upon recovery.
+**Hybrid fee.** The Firm will bill at a reduced hourly rate of {[HourlyRate|currency]} per hour, plus a contingent fee equal to {[ContingencyPercent]}% ({[ContingencyPercent|words]} percent) of any gross recovery. The reduced hourly component is payable regardless of outcome; the contingent component is payable only upon recovery.
 {[else]}
 **Fees.** [DRAFTER: FeeType "{[FeeType]}" is not recognized. Choose Hourly, Flat, Contingency, or Hybrid.]
 {[end if]}
-
 {[if Retainer > 0]}
+
 **Advance deposit.** As a condition of this engagement, the Client will deposit {[Retainer|currency]} ({[Retainer|dollars]}) with the Firm. This deposit will be held in the Firm's client trust account{[if Firm.State = "California"]} (an IOLTA account as required by California law){[end if]} and applied against fees and costs as they are billed. {[if ReplenishRetainer]}When the balance falls below {[RetainerFloor|currency]}, the Client agrees to replenish the deposit to the original amount within ten (10) days of request.{[else]}Once the deposit is exhausted, invoices are payable as described below.{[end if]} Any unused balance will be refunded at the conclusion of the Matter.
 {[end if]}
 
@@ -74,7 +77,8 @@ Our representation is limited to the Matter as described above. It does not incl
 
 In addition to fees, the Client is responsible for costs incurred on the Client's behalf, including filing fees, service of process, court reporters, travel, and delivery charges. Routine photocopying and postage are billed at the Firm's standard rates.
 {[if IsLitigation]}
-**Litigation costs and experts.** Litigation frequently requires expert witnesses, deposition transcripts, e-discovery vendors, and mediators. These costs can be substantial. The Firm will not retain an expert or vendor expected to cost more than {[CostApprovalThreshold|currency|default:"$2,500"]} without the Client's prior approval. {[if FeeType = "Contingency"]}Costs will be advanced by the Firm and reimbursed from any recovery before the contingency fee is calculated; if there is no recovery, the Client {[if ClientOwesCostsIfNoRecovery]}remains responsible for reimbursing costs advanced{[else]}will not be required to reimburse costs advanced{[end if]}.{[end if]}
+
+**Litigation costs and experts.** Litigation frequently requires expert witnesses, deposition transcripts, e-discovery vendors, and mediators. These costs can be substantial. The Firm will not retain an expert or vendor expected to cost more than {[CostApprovalThreshold|currency|default:"$2,500.00"]} without the Client's prior approval.{[if FeeType = "Contingency"]} Costs will be advanced by the Firm and reimbursed from any recovery before the contingency fee is calculated; if there is no recovery, the Client {[if ClientOwesCostsIfNoRecovery]}remains responsible for reimbursing costs advanced{[else]}will not be required to reimburse costs advanced{[end if]}.{[end if]}
 {[end if]}
 
 # 4. Billing and Payment
@@ -82,10 +86,10 @@ In addition to fees, the Client is responsible for costs incurred on the Client'
 {[if FeeType = "Contingency"]}
 Because this is a contingency engagement, you will not receive monthly fee invoices. We will provide a statement of costs periodically and a full accounting at the time of any distribution.
 {[else]}
-The Firm will send itemized invoices {[BillingFrequency|default:"monthly"|lower]}. Invoices are due within {[PaymentDays|default:"30"]} days of the invoice date. {[if LateInterestRate > 0]}Balances unpaid after that date accrue interest at {[LateInterestRate]}% per annum.{[end if]} Questions about an invoice should be raised within thirty (30) days of receipt.
+The Firm will send itemized invoices {[BillingFrequency|default:"monthly"|lower]}. Invoices are due within {[PaymentDays|default:"30"]} days of the invoice date.{[if LateInterestRate > 0]} Balances unpaid after that date accrue interest at {[LateInterestRate]}% per annum.{[end if]} Questions about an invoice should be raised within thirty (30) days of receipt.
 {[end if]}
-
 {[if count(AdditionalClients) > 0]}
+
 # 5. Joint Representation and Conflict Waiver
 
 {[# Only rendered when there is more than one client. ]}
@@ -94,30 +98,27 @@ The Firm has been asked to represent {[Client.FullName]} and {[list AdditionalCl
 By signing below, each Client (a) confirms that they have been advised of these risks, (b) consents to the joint representation, (c) agrees that there will be no attorney-client privilege between the Clients with respect to the Matter, and (d) acknowledges the right to consult independent counsel regarding this waiver.
 {[end if]}
 
-# {[if count(AdditionalClients) > 0]}6{[else]}5{[end if]}. Termination
+# {[5 + (count(AdditionalClients) > 0 ? 1 : 0)]}. Termination
 
 The Client may terminate this engagement at any time by written notice. The Firm may withdraw as permitted by the applicable rules of professional conduct{[if IsLitigation]}, subject to court approval where required{[end if]}. Upon termination, the Client remains responsible for fees and costs incurred through the date of termination{[if FeeType = "Contingency"]} on a quantum meruit basis, payable only from any eventual recovery{[end if]}.
 
-# {[if count(AdditionalClients) > 0]}7{[else]}6{[end if]}. File Retention
+# {[6 + (count(AdditionalClients) > 0 ? 1 : 0)]}. File Retention
 
 At the conclusion of the Matter, the Firm will return original documents on request and will retain the file for {[FileRetentionYears|default:"7"]} years, after which it may be destroyed without further notice.
 
-{[# --- State-specific notices --- ]}
+{[# --- State-specific notices. Verify against the current rules before use. --- ]}
 {[if Firm.State = "California"]}
 # State Notice — California
-
 {[if not Firm.HasMalpracticeInsurance]}
+
 **Notice regarding professional liability insurance.** Pursuant to California Rule of Professional Conduct 1.4.2, the Firm informs you that it does not maintain professional liability insurance.
 {[end if]}
-This agreement is governed by California Business and Professions Code sections 6147 and 6148. {[if FeeType = "Contingency"]}The contingency rate stated above is not set by law and is negotiable between attorney and client.{[end if]}
+
+This letter is intended to satisfy the written fee agreement requirements of California Business and Professions Code {[if FeeType = "Contingency"]}section 6147. The contingency rate stated above is not set by law and has been negotiated between the Firm and the Client.{[else]}section 6148.{[end if]}
 {[else if Firm.State = "New York"]}
 # State Notice — New York
 
-{[if FeeType != "Contingency"]}
-In the event of a fee dispute, you may have the right to arbitration under Part 137 of the Rules of the Chief Administrator of the Courts. A Statement of Client's Rights and Responsibilities is enclosed as required by 22 NYCRR Part 1210.
-{[else]}
-This contingency arrangement is subject to 22 NYCRR 1215 and, if applicable, the sliding-scale limits of Judiciary Law § 474-a for personal injury matters.
-{[end if]}
+This letter is intended to satisfy the written letter of engagement requirements of 22 NYCRR Part 1215. {[if FeeType != "Contingency"]}In the event of a fee dispute, you may have the right to arbitration under Part 137 of the Rules of the Chief Administrator of the Courts.{[else]}If the Matter is a claim for personal injury, the contingency fee is subject to the limits of Judiciary Law § 474-a and the applicable Appellate Division rules.{[end if]}
 {[else]}
 This agreement is governed by the laws and rules of professional conduct of the State of {[Firm.State]}.
 {[end if]}
@@ -172,7 +173,7 @@ export const sampleAnswers = {
     IsEntity: true,
     ContactName: 'Daniel Foss',
     ContactTitle: 'Chief Executive Officer',
-    Salutation: '',
+    Salutation: 'Mr. Foss',
     Address: { Street: '48 Bluxome Street', City: 'San Francisco', State: 'CA', Zip: '94107' },
   },
   AdditionalClients: [{ FullName: 'Daniel Foss' }],
@@ -199,4 +200,55 @@ export const sampleAnswers = {
   FileRetentionYears: 7,
 };
 
-export default { id, name, description, category, text, sampleAnswers };
+/** Questionnaire overrides (model.variables shape). */
+export const model = {
+  variables: {
+    'Firm.Name': { label: 'Firm name', type: 'text' },
+    'Firm.Address.Street': { label: 'Firm street address', type: 'text' },
+    'Firm.Address.City': { label: 'Firm city', type: 'text' },
+    'Firm.Address.State': { label: 'Firm state (abbreviation for letterhead)', type: 'text' },
+    'Firm.Address.Zip': { label: 'Firm ZIP code', type: 'text' },
+    'Firm.Phone': { label: 'Firm telephone', type: 'phone' },
+    'Firm.State': { label: 'State whose rules of professional conduct govern (full name)', type: 'text', help: 'California and New York trigger state-specific notices; any other state prints a generic governing-law sentence.' },
+    'Firm.HasMalpracticeInsurance': { label: 'Does the Firm carry professional liability insurance?', type: 'boolean' },
+    'ResponsibleAttorney.Name': { label: 'Responsible attorney', type: 'text' },
+    'ResponsibleAttorney.Title': { label: "Responsible attorney's title", type: 'text' },
+    'ResponsibleAttorney.BarNumber': { label: 'Bar number (optional)', type: 'text', required: false },
+    'ResponsibleAttorney.Email': { label: "Responsible attorney's email", type: 'email' },
+    LetterDate: { label: 'Date of letter', type: 'date' },
+    'Client.IsEntity': { label: 'Is the client a business entity?', type: 'boolean' },
+    'Client.FullName': { label: 'Client full legal name', type: 'text' },
+    'Client.ContactName': { label: 'Entity contact person', type: 'text' },
+    'Client.ContactTitle': { label: "Contact person's title", type: 'text' },
+    'Client.Salutation': { label: 'Salutation (e.g., Mr. Foss)', type: 'text', required: false },
+    'Client.Address.Street': { label: 'Client street address', type: 'text' },
+    'Client.Address.City': { label: 'Client city', type: 'text' },
+    'Client.Address.State': { label: 'Client state', type: 'text' },
+    'Client.Address.Zip': { label: 'Client ZIP code', type: 'text' },
+    MatterName: { label: 'Matter name (Re: line)', type: 'text' },
+    MatterDescription: { label: 'Description of the matter', type: 'longtext' },
+    AdditionalClients: { label: 'Additional jointly represented clients', type: 'list' },
+    'AdditionalClients[].FullName': { label: 'Additional client full name', type: 'text' },
+    IsLitigation: { label: 'Is this a litigation matter?', type: 'boolean' },
+    LitigationRole: { label: "Client's role in the litigation", type: 'selection', options: ['Plaintiff', 'Defendant'] },
+    Court: { label: 'Court (optional)', type: 'text', required: false },
+    FeeType: { label: 'Fee arrangement', type: 'selection', options: ['Hourly', 'Flat', 'Contingency', 'Hybrid'] },
+    HourlyRate: { label: 'Hourly rate of responsible attorney', type: 'currency' },
+    ParalegalRate: { label: 'Paralegal hourly rate (0 to omit)', type: 'currency' },
+    FlatFee: { label: 'Flat fee', type: 'currency' },
+    FlatFeeEarnedOnReceipt: { label: 'Is the flat fee earned on receipt?', type: 'boolean' },
+    ContingencyPercent: { label: 'Contingency percentage', type: 'number' },
+    ContingencyPercentTrial: { label: 'Contingency percentage if tried (0 if same)', type: 'number' },
+    ClientOwesCostsIfNoRecovery: { label: 'Does the client owe advanced costs if there is no recovery?', type: 'boolean' },
+    Retainer: { label: 'Advance deposit (0 for none)', type: 'currency' },
+    ReplenishRetainer: { label: 'Must the client replenish the deposit?', type: 'boolean' },
+    RetainerFloor: { label: 'Replenish when balance falls below', type: 'currency' },
+    CostApprovalThreshold: { label: 'Cost approval threshold', type: 'currency' },
+    BillingFrequency: { label: 'Billing frequency', type: 'selection', options: ['Monthly', 'Quarterly'] },
+    PaymentDays: { label: 'Invoice payment terms (days)', type: 'number' },
+    LateInterestRate: { label: 'Late interest rate, % per annum (0 for none)', type: 'number' },
+    FileRetentionYears: { label: 'File retention period (years)', type: 'number' },
+  },
+};
+
+export default { id, name, description, category, text, sampleAnswers, model };

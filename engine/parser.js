@@ -39,17 +39,38 @@ export function classifyTag(v) {
   if (RE.end.test(s)) return { kind: 'end' };
   if (RE.else.test(s)) return { kind: 'else' };
   if ((m = RE.elseif.exec(s))) return { kind: 'elseif', arg: m[1].trim() };
+  // `list("a","b")` / `if(Cond, "yes", "no")` are function calls, not block tags.
+  if (isKeywordCall(s)) return { kind: 'field', arg: s };
   // A bare keyword written with capitals ("{[List]}", "{[If]}") is a variable named that way.
   if ((m = RE.if.exec(s))) return m[1].trim() === '' && s !== 'if' ? { kind: 'field', arg: s } : { kind: 'if', arg: m[1].trim() };
   if ((m = RE.list.exec(s))) {
     let arg = m[1].trim();
     if (arg === '' && s !== s.toLowerCase()) return { kind: 'field', arg: s };
     let itemName;
-    const as = /^(.*?)\s+as\s+([A-Za-z_$][A-Za-z0-9_$]*)$/is.exec(arg);
+    const as = /^(.*?)\s+as\s+([\p{L}_$][\p{L}\p{N}_$]*)$/isu.exec(arg);
     if (as) { arg = as[1].trim(); itemName = as[2]; }
     return { kind: 'list', arg, itemName };
   }
   return { kind: 'field', arg: s };
+}
+
+/**
+ * `list(...)` / `if(...)` written as a call: keyword immediately followed by "(", the
+ * parenthesised group spans the whole tag (filters may follow) and holds a top-level comma.
+ */
+function isKeywordCall(s) {
+  const m = /^(?:list|if)\(/i.exec(s);
+  if (!m) return false;
+  let depth = 0, comma = false, q = null;
+  for (let i = m[0].length - 1; i < s.length; i++) {
+    const ch = s[i];
+    if (q) { if (ch === '\\') i++; else if (ch === q) q = null; continue; }
+    if (ch === '"' || ch === "'") q = ch;
+    else if (ch === '(') depth++;
+    else if (ch === ')') { depth--; if (depth === 0) return comma && /^\s*(\||$)/.test(s.slice(i + 1)); }
+    else if (ch === ',' && depth === 1) comma = true;
+  }
+  return false;
 }
 
 const STRUCTURAL = new Set(['comment', 'if', 'elseif', 'else', 'endif', 'list', 'endlist', 'end']);
@@ -60,25 +81,36 @@ const STRUCTURAL = new Set(['comment', 'if', 'elseif', 'else', 'endif', 'list', 
  * @param {import('./lexer.js').Token[]} tokens
  */
 function stripStandaloneTagLines(tokens) {
+  const isStructural = (t) => t && t.type === 'field' && STRUCTURAL.has(classifyTag(t.value).kind);
   for (let i = 0; i < tokens.length; i++) {
-    const t = tokens[i];
-    if (t.type !== 'field') continue;
-    if (!STRUCTURAL.has(classifyTag(t.value).kind)) continue;
-    const prev = tokens[i - 1], next = tokens[i + 1];
-    if (prev && prev.type !== 'text') continue;
-    if (next && next.type !== 'text') continue;
+    if (!isStructural(tokens[i])) continue;
+    // Group this tag with any structural tags that follow it on the same line
+    // (`{[end if]}{[if X]}`, `{[end if]} {[end list]}`), so the whole run counts as one standalone line.
+    let k = i;
+    for (;;) {
+      if (isStructural(tokens[k + 1])) { k++; continue; }
+      const gap = tokens[k + 1];
+      if (gap && gap.type === 'text' && /^[ \t]+$/.test(gap.value) && isStructural(tokens[k + 2])) { k += 2; continue; }
+      break;
+    }
+    const prev = tokens[i - 1], next = tokens[k + 1];
+    const done = () => { i = k; };
+    if (prev && prev.type !== 'text') { done(); continue; }
+    if (next && next.type !== 'text') { done(); continue; }
     const prevVal = prev ? prev.value : '';
     const nextVal = next ? next.value : '';
     const nl = prevVal.lastIndexOf('\n');
     const tail = prevVal.slice(nl + 1);
-    if (!/^[ \t]*$/.test(tail)) continue;
-    if (nl === -1 && prevVal !== '' && i > 1) continue; // whitespace after a value field on the same line → not alone
+    if (!/^[ \t]*$/.test(tail)) { done(); continue; }
+    if (nl === -1 && prevVal !== '' && i > 1) { done(); continue; } // whitespace after a value field on the same line → not alone
     const headMatch = /^[ \t]*(\r?\n|$)/.exec(nextVal);
-    if (!headMatch) continue;
-    if (next && nextVal.length > 0 && headMatch[1] === '' && headMatch[0].length !== nextVal.length) continue;
-    // Standalone → drop trailing whitespace of prev line and the newline that follows the tag.
+    if (!headMatch) { done(); continue; }
+    if (next && nextVal.length > 0 && headMatch[1] === '' && headMatch[0].length !== nextVal.length) { done(); continue; }
+    // Standalone → drop trailing whitespace of prev line, the whitespace between grouped tags, and the newline that follows.
     if (prev) prev.value = prevVal.slice(0, nl + 1);
+    for (let j = i + 1; j < k; j++) if (tokens[j].type === 'text') tokens[j].value = '';
     if (next) next.value = nextVal.slice(headMatch[0].length);
+    done();
   }
 }
 

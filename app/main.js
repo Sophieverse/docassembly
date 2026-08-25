@@ -2,9 +2,10 @@
  * @module main
  * App bootstrap: theme, routes, first-run experience.
  */
-import { route, start, navigate, dispatch } from './router.js';
+import { route, start, navigate, dispatch, setNotFound } from './router.js';
 import * as store from './store.js';
-import { toast, modal, el } from './components.js';
+import { toast, modal, el, download } from './components.js';
+import { modelFor } from './docgen.js';
 import { renderTemplates } from './ui-templates.js';
 import { renderEditor } from './ui-editor.js';
 import { renderInterview } from './ui-interview.js';
@@ -43,13 +44,32 @@ function updateFirm() {
   document.getElementById('topbar-firm').textContent = s.firmName || '';
 }
 updateFirm();
+let lastStorageToast = 0;
 store.subscribe((evt) => {
   if (evt.type === 'error') {
+    // Autosave fires per keystroke; do not stack a toast per failure.
+    if (Date.now() - lastStorageToast < 8000) return;
+    lastStorageToast = Date.now();
     toast(evt.quota ? 'Storage is full — could not save. Export your data and delete unused templates/records.' : 'Could not save to browser storage.', 'error', 6000);
   } else if (evt.kind === 'settings' || evt.kind === 'all') {
     updateFirm();
   }
 });
+
+/* ---------- recovery banner (unreadable localStorage found at startup) ---------- */
+function showRecoveryBanner() {
+  const r = store.getRecovery();
+  if (!r) return;
+  const banner = el('div.banner.banner-warn', { role: 'alert' },
+    el('strong', 'Your saved data could not be read. '),
+    r.recoveredFromSnapshot ? 'The previous good copy was restored instead. ' : 'DocAssembly started with an empty workspace. ',
+    r.stashKey ? 'The unreadable copy was kept untouched in this browser. ' : '',
+    el('button.btn.btn-sm', { type: 'button', onClick: () => download(`docassembly-unreadable-${new Date().toISOString().slice(0, 10)}.txt`, r.raw, 'text/plain') }, 'Download unreadable copy'),
+    el('button.btn.btn-sm.btn-ghost', { type: 'button', onClick: () => { banner.remove(); store.clearRecovery(); } }, 'Dismiss'),
+  );
+  document.body.insertBefore(banner, document.getElementById('main'));
+}
+showRecoveryBanner();
 
 /* ---------- routes ---------- */
 const main = document.getElementById('main');
@@ -68,10 +88,14 @@ route('/packages', wrap(renderPackages));
 route('/packages/:id', wrap(renderPackages));
 route('/settings', wrap(renderSettings));
 route('/help', wrap(renderHelp));
+setNotFound(wrap((m, ctx) => {
+  m.appendChild(el('div.card.empty', el('h2', 'Page not found'), el('p', 'There is nothing at ', el('code', '#' + ctx.path), '.'),
+    el('div.flex', { style: { justifyContent: 'center' } }, el('a.btn.btn-primary', { href: '#/templates' }, 'Go to templates'), el('a.btn', { href: '#/help' }, 'Help'))));
+}));
 
 /* ---------- first run ---------- */
 export function loadSample(sample) {
-  const t = store.newTemplate({ name: sample.name, description: sample.description || '', text: sample.text });
+  const t = store.newTemplate({ name: sample.name, description: sample.description || '', text: sample.text, model: modelFor(sample.text) });
   if (sample.sampleAnswers) store.templates.update(t.id, { sampleAnswers: sample.sampleAnswers }, { silent: true });
   return t;
 }

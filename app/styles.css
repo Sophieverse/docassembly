@@ -10,7 +10,7 @@
   --bg-hover: #f0f2f5;
   --fg: #1c2230;
   --fg-muted: #5a6478;
-  --fg-faint: #8b93a5;
+  --fg-faint: #667085;
   --border: #d9dde5;
   --border-strong: #b9c0cc;
   --accent: #1f4e8c;
@@ -21,7 +21,7 @@
   --danger-soft: #fde9e7;
   --warn: #8a5a00;
   --warn-soft: #fff4d6;
-  --ok: #1a7f4b;
+  --ok: #15703f;
   --ok-soft: #e3f5ea;
   --code-bg: #f6f7f9;
   --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .1);
@@ -209,6 +209,13 @@ table.list a.rowlink { color: var(--fg); }
 .badge-danger { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
 .badge-accent { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
 [data-theme="dark"] .badge-accent { color: #ffffff; }
+
+/* Banners */
+.banner { display: flex; flex-wrap: wrap; gap: .5rem .75rem; align-items: center; padding: .6rem 1.25rem; border-bottom: 1px solid var(--border); font-size: .92rem; }
+.banner-warn { background: var(--warn-soft); color: var(--warn); }
+.banner .btn { color: var(--fg); }
+input.invalid, .invalid > input { border-color: var(--danger); }
+.pkg-item .error { color: var(--danger); font-size: .8rem; margin-top: .2rem; }
 
 /* Toasts */
 .toasts { position: fixed; right: 1rem; bottom: 1rem; display: flex; flex-direction: column; gap: .5rem; z-index: 60; }

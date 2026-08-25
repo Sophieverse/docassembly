@@ -59,42 +59,53 @@ function assignNumIds(blocks, state = { next: 2 }) {
 }
 
 // ---------- XML ----------
-function runXml(r) {
-  const props = [];
-  if (r.bold) props.push('<w:b/><w:bCs/>');
-  if (r.italic) props.push('<w:i/><w:iCs/>');
-  if (r.underline) props.push('<w:u w:val="single"/>');
-  const rPr = props.length ? `<w:rPr>${props.join('')}</w:rPr>` : '';
+const HEADING_SZ = { Title: 8, Heading1: 4, Heading2: 2, Heading3: 0 };
+
+/** Direct font + size on every run, derived from the paragraph style + document options. Word honours styles.xml,
+ *  but several importers (Apple textutil/TextEdit/Quick Look) ignore styles.xml and numbering.xml entirely; the direct
+ *  font/size keeps headings visibly larger there. Bold/italic/caps stay style-only so readDocx round-trips `**` exactly. */
+function styleRunProps(style, ctx) {
+  const f = escapeXml(ctx.font);
+  const sz = ctx.sz + 2 * (HEADING_SZ[style] ?? 0);
+  return `<w:rFonts w:ascii="${f}" w:hAnsi="${f}" w:cs="${f}"/><w:sz w:val="${sz}"/><w:szCs w:val="${sz}"/>`;
+}
+
+function runXml(r, style, ctx) {
+  let props = styleRunProps(style, ctx);
+  if (r.bold) props += '<w:b/><w:bCs/>';
+  if (r.italic) props += '<w:i/><w:iCs/>';
+  if (r.underline) props += '<w:u w:val="single"/>';
   let inner = '';
   for (const p of r.text.split(/(\t|\n)/)) {
     if (p === '\t') inner += '<w:tab/>';
     else if (p === '\n') inner += '<w:br/>';
     else if (p.length) inner += `<w:t xml:space="preserve">${escapeXml(p)}</w:t>`;
   }
-  return `<w:r>${rPr}${inner}</w:r>`;
+  return `<w:r><w:rPr>${props}</w:rPr>${inner}</w:r>`;
 }
 
 const JC = { justify: 'both', center: 'center', right: 'right' };
 
-function paragraphXml(p) {
+function paragraphXml(p, ctx) {
   const pPr = [];
   if (p.style !== 'Normal') pPr.push(`<w:pStyle w:val="${escapeXml(p.style)}"/>`);
+  if (p.style === 'Title' && p.align === 'left') p = { ...p, align: 'center' };
   else if (p.numbering) pPr.push('<w:pStyle w:val="ListParagraph"/>');
   if (p.numbering) pPr.push(`<w:numPr><w:ilvl w:val="${p.numbering.level}"/><w:numId w:val="${p._numId || BULLET_NUM_ID}"/></w:numPr>`);
   if (p.indent) pPr.push(`<w:ind w:left="${720 * p.indent}"/>`);
   if (JC[p.align]) pPr.push(`<w:jc w:val="${JC[p.align]}"/>`);
   const pb = p.pageBreakBefore ? '<w:r><w:br w:type="page"/></w:r>' : '';
-  return `<w:p>${pPr.length ? `<w:pPr>${pPr.join('')}</w:pPr>` : ''}${pb}${p.runs.map(runXml).join('')}</w:p>`;
+  return `<w:p>${pPr.length ? `<w:pPr>${pPr.join('')}</w:pPr>` : ''}${pb}${p.runs.map((r) => runXml(r, p.style, ctx)).join('')}</w:p>`;
 }
 
 const BORDERS = '<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
   '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
   '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>';
 
-function tableXml(t) {
+function tableXml(t, ctx) {
   const rows = t.rows.map((row) => {
     const cells = row.map((cell) => {
-      const blocks = cell.length ? cell.map(blockXml).join('') : '<w:p/>';
+      const blocks = cell.length ? cell.map((b) => blockXml(b, ctx)).join('') : '<w:p/>';
       return `<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr>${blocks}</w:tc>`;
     }).join('');
     return `<w:tr>${cells}</w:tr>`;
@@ -102,11 +113,11 @@ function tableXml(t) {
   return `<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="5000" w:type="pct"/><w:tblBorders>${BORDERS}</w:tblBorders></w:tblPr>${rows}</w:tbl>`;
 }
 
-function blockXml(b) {
+function blockXml(b, ctx) {
   switch (b.type) {
-    case 'paragraph': return paragraphXml(b);
+    case 'paragraph': return paragraphXml(b, ctx);
     case 'pagebreak': return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
-    case 'table': return tableXml(b);
+    case 'table': return tableXml(b, ctx);
     default: throw new Error('docxwrite: unknown block type ' + b.type);
   }
 }
@@ -120,7 +131,8 @@ function marginsTwips(m) {
 /** document.xml for normalized blocks (numIds already assigned). */
 function documentXml(blocks, opts) {
   const m = marginsTwips(opts.margins);
-  let body = blocks.map(blockXml).join('');
+  const ctx = { font: String(opts.font || 'Times New Roman'), sz: Math.round((+opts.fontSize || 12) * 2) };
+  let body = blocks.map((b) => blockXml(b, ctx)).join('');
   if (blocks.length && blocks[blocks.length - 1].type === 'table') body += '<w:p/>'; // Word requires a paragraph after a trailing table
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
     `<w:document ${W_NS}><w:body>${body}` +

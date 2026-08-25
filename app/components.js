@@ -102,7 +102,11 @@ export function modal({ title = '', body = null, buttons = null, wide = false, c
         type: 'button',
         class: b.primary ? 'btn-primary' : b.danger ? 'btn-danger' : '',
         onClick: async () => {
-          if (b.onClick) { const r = await b.onClick(); if (r === false) return; }
+          if (b.onClick) {
+            let r;
+            try { r = await b.onClick(); } catch (e) { console.error(e); toast('Something went wrong: ' + (e && e.message || e), 'error', 6000); close(null); return; }
+            if (r === false) return;
+          }
           close(b.value !== undefined ? b.value : b.label);
         },
       }, b.label));
@@ -113,7 +117,12 @@ export function modal({ title = '', body = null, buttons = null, wide = false, c
   document.addEventListener('keydown', onKey);
   host.appendChild(backdrop);
   setTimeout(() => {
-    const f = box.querySelector('input, textarea, select, button.btn-primary, button');
+    // Prefer a control in the body, then the primary action, then any footer button — never the × close button.
+    const f = bodyEl.querySelector('input:not([type=hidden]):not([disabled]), textarea, select')
+      || box.querySelector('.modal-foot button.btn-primary')
+      || bodyEl.querySelector('button:not([disabled]), a[href]')
+      || box.querySelector('.modal-foot button')
+      || box.querySelector('button');
     if (f) f.focus();
   }, 0);
   return { close, promise, box, body: bodyEl };

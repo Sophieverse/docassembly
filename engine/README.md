@@ -63,7 +63,35 @@ Blocks nest freely. Inline use is fine too: `He is {[if Married]}married{[else]}
 
 **Blank-line rule:** when a block tag (`if`, `else`, `end if`, `list`, `end list`, comment) sits alone on a line, that whole line is removed, so conditional paragraphs never leave empty lines behind.
 
-Truthiness: empty text, `null`, `0`, `false`, and empty lists are false; everything else is true. A variable used bare in a condition (`{[if IsMarried]}`, `{[if not HasKids]}`) is inferred to be a Yes/No question.
+Only the tag's own line is removed — blank lines around the block are kept. So this layout leaves a double blank line when the block is skipped (the blank before `{[if]}` and the blank after `{[end if]}` both survive):
+
+```
+paragraph.
+
+{[if X]}
+optional paragraph.
+{[end if]}
+
+next paragraph.
+```
+
+Put the separating blank line *inside* the block instead, and nothing is left behind either way:
+
+```
+paragraph.
+{[if X]}
+
+optional paragraph.
+{[end if]}
+
+next paragraph.
+```
+
+The same applies inside a sentence: keep the leading space inside the tag (`due.{[if X]} Interest accrues.{[end if]} Next`) rather than before it, or a double space remains when the condition is false. Guard lists that may be empty (`{[if count(Children) > 0]}`), or an empty list prints "children: .".
+
+Truthiness: empty text, `null`, `0`, `false`, and empty lists are false; everything else is true. A variable used bare in a condition (`{[if IsMarried]}`, `{[if not HasKids]}`) is inferred to be a Yes/No question — **even when the same variable is also printed as text** (`{[if Court]} in the {[Court]}{[end if]}` makes `Court` a Yes/No question). Until the analyzer is smarter, override the type in the Variables panel / model, or test optional text with `{[if not isEmpty(Court)]}`, which keeps it a text question.
+
+Per-item list tests work in conditions too: `{[if Children|any: yearsBetween(DOB, today()) < 18]}…{[end if]}` needs no stored "IsMinor" answer.
 
 ## Lists
 
@@ -117,7 +145,7 @@ Missing variables evaluate to empty (never an error) and are reported in the war
 Every filter is also callable as a function with the value first: `{[Fee|currency:"€"]}` = `{[currency(Fee, "€")]}`. Names are case-insensitive. All functions tolerate missing input and return "" (or a neutral value).
 
 ### Text
-`upper` · `lower` · `title` (Title Case Each Word) · `titlecaps` · `capitalize` (first letter only) · `initcap` (`initcap:true` lowercases the rest) · `trim` · `initials` · `possessive` ("James" → "James'", "Mary" → "Mary's") · `len`/`length` · `contains` · `startswith` · `endswith` · `replace:"a":"b"` · `nbsp` · `blank` · `article` ("a"/"an") · `plural:"child"` → "children" (`plural(word, count)` returns singular for 1) · `quantity(3, "heir")` → "3 heirs" · `salutation(gender)` → Mr./Ms./Mx.
+`upper` · `lower` · `title` (Title Case Each Word) · `titlecaps` · `capitalize` (first letter only) · `initcap` (`initcap:true` lowercases the rest) · `trim` · `initials` ("John Doe" → "JD"; `initials:"."` → "J.D."; `initials:" "` → "J. D.") · `possessive` ("James" → "James'", "Mary" → "Mary's") · `len`/`length` · `contains` · `startswith` · `endswith` · `replace:"a":"b"` · `nbsp` · `blank` · `article` ("a"/"an") · `plural:"child"` → "children" (`plural(word, count)` returns singular for 1) · `quantity(3, "heir")` → "3 heirs" · `salutation(gender)` → Mr./Ms./Mx.
 
 ### Numbers and money
 `currency` (`$1,234.50`; args symbol, decimals) · `number` (`1,234,567.89`; arg decimals) · `round` · `abs` · `min` · `max` · `words`/`cardinal` (`1234` → "one thousand two hundred thirty-four") · `ordinal` (`1` → "1st") · `ordinalwords`/`ordinalword` (`1` → "first") · `ordsuffix` (`22` → "nd") · `cardinaldec:2` (`12.35` → "twelve point three five") · `roman` · `alpha` (`27` → "aa")
@@ -148,7 +176,7 @@ Date math: `today()` · `addDays` · `addMonths` · `addYears` · `addWeeks` · 
 `format` also infers from an example: `format:"9,999.00"` → 1,234.50 · `"$9,999.00"` · `"9,999.99%"` · `"0,0.00"` · `"0%"` · `"nine"` / `"Nine"` / `"NINE"` (words) · `"3rd"` (ordinal) · `"third"` / `"Third"` · `"Nine Dollars and Twelve Cents"` · `"Nine Dollars and 9/100"` · `"Nine and 9/100 Dollars"`. For text: `format:"LIKE THIS"`, `"Like This"`, `"like this"`. For booleans: `format:"heads":"tails"`.
 
 ### Grammar helpers
-`pluralize(count, "child", "children")` → "3 children" · `isAre` · `hasHave` · `doesDo` · `wasWere` (take a count or a list) · `pronoun(gender, form)` with forms `subject` / `object` / `possessive` / `possessiveadj` / `reflexive` (he/him/his/his/himself · she/her/hers/her/herself · they/them/theirs/their/themselves).
+`pluralize(count, "child", "children")` → "3 children" (third argument `true` omits the number: `{[count(Children)|pluralize:"child","children",true]}` → "children") · `isAre` · `hasHave` · `doesDo` · `wasWere` (take a count or a list) · `pronoun(gender, form)` with forms `subject` / `object` / `possessive` / `possessiveadj` / `reflexive` (he/him/his/his/himself · she/her/hers/her/herself · they/them/theirs/their/themselves).
 
 ### Lists
 `join` (`A, B, and C`; args conjunction, oxford) · `punc:"1, 2, and 3"` (join by example; trailing "." kept) · `count` · `sum(list, "Field")` · `any` · `all` · `first` · `last` · `sort(list, "Field", "desc")` · `filter(list, "Field", value)` · `find` · `map`/`pluck` · `group` · `unique` · `reverse` · `list(a, b, c)` literal.
@@ -166,7 +194,7 @@ Per-item expressions — unquoted arguments are evaluated for each item, with ba
 ```
 
 ### Logic
-`default:"fallback"` / `else:"fallback"` · `coalesce(a, b, c)` · `isEmpty` · `if(cond, a, b)` · ternary `cond ? a : b`.
+`default:"fallback"` / `else:"fallback"` (replace empty text/null only — `0` and `false` are *not* replaced, and `{[X|currency|default:…]}` never fires because `currency(0)` is "$0.00"; use `{[if X > 0]}` for numeric fallbacks) · `coalesce(a, b, c)` · `isEmpty` · `if(cond, a, b)` · ternary `cond ? a : b`. Booleans add up in arithmetic, so section numbers can be computed: `# {[5 + (IncludeWaiver ? 1 : 0)]}. Termination` or `# ARTICLE {[roman(3 + (PetTrust ? 1 : 0))]}`.
 
 ### Value methods
 Call these with dot syntax on any value: `.toUpperCase() .toLowerCase() .trim() .length .includes(x) .startsWith(x) .endsWith(x) .replace(a, b) .split(sep) .slice(a, b) .substring(a, b) .indexOf(x) .padStart(n, c) .padEnd(n, c) .toInt() .toFixed(n) .first(n) .last(n) .join(sep) .filter(expr) .map(expr) .sort(expr)`.
@@ -191,6 +219,13 @@ Call these with dot syntax on any value: `.toUpperCase() .toLowerCase() .trim() 
 | names ending in Notes / Description / Address … | long text |
 
 Inside a list body, any name not defined at the top level of the template is assumed to be a field of the list item (`Children[].Name`). To reference a global variable from inside a list, reference it somewhere outside the list too (or use the `as` alias to make item fields explicit). Types and labels can be overridden in the Variables panel; those edits survive template changes.
+
+Inference caveats worth knowing when you read the generated questionnaire:
+
+- `X = "A"` … `{[else]}` infers a selection whose only options are the literals compared, so an `{[else]}` branch that means "any other value" (`Tone = "Cordial"` / else = Firm) yields a one-option selection. Compare every value explicitly (`{[else if Tone = "Firm"]}`) or set the options in the Variables panel.
+- Only the first filter applied directly to the variable counts: `{[Day|default:"1"|ordinal]}` stays text, `{[Day|ordinal|default:"1st"]}` becomes a number.
+- `pronoun`/`salutation` infer the options `male`/`female`/`neutral` (matching is case-insensitive; `Nonbinary` also works). Relabel the options in the Variables panel if you prefer.
+- A list used only with `|join` (a list of plain values) is inferred as `list`; set it to `multiselect` with options in the Variables panel.
 
 Relevance: a variable is asked when it appears in a field whose enclosing conditions are currently true, or in a condition that has been reached. If a condition depends on unanswered variables, the questions inside it wait until the condition can be evaluated. Order follows first appearance in the template.
 
@@ -229,7 +264,9 @@ import { compile, assemble, render, questionnaire, createModel } from './engine/
 
 const { ast, analysis, errors } = compile(templateText);   // never throws
 const { text, warnings, trace } = assemble(templateText, data);
-const questions = questionnaire(ast, data);                 // [{path, label, type, required, options?, listPath?, answered}]
+const questions = questionnaire(ast, data, model);          // [{path, label, type, required, options?, listPath?, answered, help?}]
+// `model` is optional: { variables: { 'Client.FullName': { label, type, options?, help?, required? } } }
+// overrides inferred labels/types (see the `model` export of each samples/*.js and mergeModel in model.js).
 ```
 
 Modules: `lexer.js` (tokenize) · `expr.js` (parseExpr / evalExpr / collectIdentifiers) · `functions.js` (built-ins, registerFunction) · `parser.js` (parse → AST) · `evaluate.js` (render, renderToBlocks) · `analyze.js` (analyze, relevantVariables, questionnaire, dependencyMap) · `model.js` (createModel, mergeModel, coerce, validate, computeDerived, emptyData).

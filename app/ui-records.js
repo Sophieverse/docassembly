@@ -6,7 +6,7 @@ import * as store from './store.js';
 import { el, clear, toast, confirm, prompt, modal, download, pickFile, readFileText, fmtDate, safeFilename } from './components.js';
 import { navigate } from './router.js';
 import { renderQuestion } from './ui-fields.js';
-import { labelFor } from './docgen.js';
+import { labelFor, modelFor, pruneEmpty } from './docgen.js';
 
 export function renderRecords(main, ctx) {
   const id = ctx && ctx.params && ctx.params.id;
@@ -78,7 +78,9 @@ function runWith(record) {
 export function unionQuestions(templates) {
   const vars = {};
   for (const t of templates) {
-    const m = t.model && t.model.variables ? t.model.variables : {};
+    // Templates that were never opened in the editor may have no model yet: derive one from the text.
+    let m = t.model && t.model.variables ? t.model.variables : {};
+    if (!Object.keys(m).length && t.text) m = modelFor(t.text).variables || {};
     for (const [path, v] of Object.entries(m)) {
       if (!v || v.orphaned || v.type === 'computed') continue;
       if (!vars[path]) vars[path] = { ...v, path, label: v.label || labelFor(t.model, path) };
@@ -132,7 +134,7 @@ function renderRecord(main, id) {
     el('div.actions',
       el('button.btn', { type: 'button', onClick: async () => { const n = await prompt('New name', { title: 'Rename record', value: r.name }); if (n && n.trim()) { store.records.update(id, { name: n.trim() }); renderRecord(main, id); } } }, 'Rename'),
       el('button.btn', { type: 'button', onClick: () => runWith(r) }, 'Run template…'),
-      el('button.btn', { type: 'button', onClick: () => download(safeFilename(r.name, 'record.json'), JSON.stringify({ ...r, data }, null, 2), 'application/json') }, 'Export'),
+      el('button.btn', { type: 'button', onClick: () => download(safeFilename(r.name, 'record.json'), JSON.stringify({ ...r, data: pruneEmpty(data) }, null, 2), 'application/json') }, 'Export'),
       saveBtn,
     )));
 
@@ -143,13 +145,20 @@ function renderRecord(main, id) {
     el('button', { type: 'button', onClick: (e) => switchTab(e, 'json') }, 'Raw JSON'));
   main.appendChild(el('div.panel', tabs, el('div.panel-body', formHost, jsonHost)));
 
-  const ta = el('textarea', { rows: 24, class: 'mono', value: JSON.stringify(data, null, 2) });
-  const jsonErr = el('div.error');
-  jsonHost.append(el('p.muted.small', 'Edit the answers directly. Dates are YYYY-MM-DD strings, money and numbers are plain numbers, Yes/No are true/false.'), ta, jsonErr);
-  ta.addEventListener('input', () => {
-    try { const v = JSON.parse(ta.value); Object.keys(data).forEach((k) => delete data[k]); Object.assign(data, v); jsonErr.textContent = ''; dirty = true; }
-    catch (e) { jsonErr.textContent = 'Invalid JSON: ' + e.message; }
-  });
+  const ta = el('textarea', { rows: 24, class: 'mono', 'aria-label': 'Answers as JSON', value: JSON.stringify(data, null, 2) });
+  const jsonErr = el('div.error', { role: 'alert' });
+  const applyJson = () => {
+    try {
+      const v = JSON.parse(ta.value);
+      if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('the top level must be an object { ... }');
+      Object.keys(data).forEach((k) => delete data[k]);
+      for (const [k, val] of Object.entries(v)) if (!/^(__proto__|constructor|prototype)$/.test(k)) data[k] = val;
+      jsonErr.textContent = ''; dirty = true; return true;
+    } catch (e) { jsonErr.textContent = 'Invalid JSON: ' + e.message; return false; }
+  };
+  jsonHost.append(el('p.muted.small', 'Edit the answers directly. Dates are YYYY-MM-DD strings, money and numbers are plain numbers, Yes/No are true/false. Changes are applied when you click Apply or leave the box.'), ta,
+    el('div.flex.mt', el('button.btn.btn-sm', { type: 'button', onClick: () => { if (applyJson()) toast('JSON applied — click Save to keep it', 'ok', 1500); } }, 'Apply JSON'), jsonErr));
+  ta.addEventListener('blur', applyJson);
 
   function drawForm() {
     clear(formHost);
@@ -170,7 +179,8 @@ function renderRecord(main, id) {
     if (which === 'form') drawForm(); else ta.value = JSON.stringify(data, null, 2);
   }
   function save() {
-    store.records.update(id, { data: JSON.parse(JSON.stringify(data)) });
+    if (!jsonHost.classList.contains('hidden') && !applyJson()) { toast('Fix the JSON before saving', 'error'); return; }
+    store.records.update(id, { data: pruneEmpty(data) });
     dirty = false;
     toast('Record saved', 'ok');
   }

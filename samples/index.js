@@ -1,8 +1,11 @@
 /**
  * @module samples
- * Bundled example templates. Each sample: { id, name, description, category, text, sampleAnswers }.
+ * Bundled example templates. Each sample: { id, name, description, category, text, sampleAnswers, model }.
  * `text` is template source in the DocAssembly language; `sampleAnswers` is a complete
- * data set matching the variable paths used in the template.
+ * data set matching the variable paths used in the template; `model` is an optional
+ * partial engine/model.js Model ({ variables: { [path]: { label, type, options?, help?, required? } } })
+ * carrying attorney-facing question labels and type/option overrides. Pass it as the third
+ * argument of questionnaire() (or merge it into the template's stored model on import).
  */
 import tutorial from './tutorial.js';
 import engagementLetter from './engagement-letter.js';

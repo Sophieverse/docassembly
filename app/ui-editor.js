@@ -4,7 +4,7 @@
  */
 import * as store from './store.js';
 import { el, clear, toast, confirm, prompt, modal, download, debounce, safeFilename } from './components.js';
-import { navigate } from './router.js';
+import { navigate, setLeaveGuard } from './router.js';
 import { compile, mergeModel, createModel, dependencyMap, questionnaire, humanize, functions } from './engine-api.js';
 import { renderTemplate, labelFor, sampleValue, setPath } from './docgen.js';
 import { renderQuestion, progress, groupQuestions, itemFieldName, fillListFields } from './ui-fields.js';
@@ -70,7 +70,7 @@ export function renderEditor(main, ctx) {
 
   /* ---------- right panel ---------- */
   const tabBody = el('div.tab-body');
-  const tabs = el('div.tabs', ['variables', 'logic', 'preview'].map((t) => el('button', { type: 'button', dataset: { tab: t }, class: activeTab === t ? 'active' : '', onClick: () => switchTab(t) }, { variables: 'Variables', logic: 'Logic map', preview: 'Preview' }[t])));
+  const tabs = el('div.tabs', { role: 'tablist' }, ['variables', 'logic', 'preview'].map((t) => el('button', { type: 'button', role: 'tab', 'aria-selected': activeTab === t ? 'true' : 'false', dataset: { tab: t }, class: activeTab === t ? 'active' : '', onClick: () => switchTab(t) }, { variables: 'Variables', logic: 'Logic map', preview: 'Preview' }[t])));
   const right = el('div.editor-right', el('div.panel', tabs, tabBody));
   main.appendChild(el('div.editor-layout', left, right));
 
@@ -97,13 +97,16 @@ export function renderEditor(main, ctx) {
   function save(explicit) {
     const text = ta.value;
     if (text === savedText && !explicit && !dirty) return;
+    if (text !== compiledText) recompile.flush(); // make sure the model matches the text being saved
     store.templates.update(id, { text, model: tpl.model });
     savedText = text; dirty = false;
     status.textContent = 'Saved';
     if (explicit) toast('Template saved', 'ok', 1200);
   }
 
+  let compiledText = tpl.text || '';
   const recompile = debounce(() => {
+    compiledText = ta.value;
     compiled = compile(ta.value);
     const errs = compiled.errors || [];
     const errLines = new Set(errs.map((e) => e.line).filter(Boolean));
@@ -114,7 +117,7 @@ export function renderEditor(main, ctx) {
       for (const e of errs) errBox.appendChild(el('div', { onClick: () => gotoLine(e.line || 1, e.col) }, `${e.line ? `Line ${e.line}${e.col ? ':' + e.col : ''} — ` : ''}${e.message}`));
     } else {
       errBox.classList.add('hidden');
-      try { tpl.model = mergeModel(tpl.model || { variables: {}, order: [] }, compiled.analysis); } catch (e) { console.warn('mergeModel failed', e); }
+      try { mergeInPlace(tpl.model, mergeModel(tpl.model, compiled.analysis)); } catch (e) { console.warn('mergeModel failed', e); }
     }
     const nVars = Object.values(tpl.model.variables || {}).filter((v) => !v.orphaned).length;
     clear(statusBar);
@@ -122,6 +125,16 @@ export function renderEditor(main, ctx) {
       errs.length ? el('span', { style: { color: 'var(--danger)' } }, `${errs.length} syntax error${errs.length === 1 ? '' : 's'}`) : el('span', { style: { color: 'var(--ok)' } }, 'Compiles cleanly'));
     drawTab();
   }, 300);
+
+  /** Apply a merged model without replacing the objects the Variables table is editing. */
+  function mergeInPlace(model, merged) {
+    if (!merged || merged === model) return;
+    const vars = model.variables || (model.variables = {});
+    const next = merged.variables || {};
+    for (const k of Object.keys(vars)) if (!(k in next)) delete vars[k];
+    for (const [k, v] of Object.entries(next)) { if (vars[k]) Object.assign(vars[k], v); else vars[k] = v; }
+    model.order = (merged.order || Object.keys(next)).slice();
+  }
 
   function gotoLine(line, col = 1) {
     const lines = ta.value.split('\n');
@@ -230,7 +243,7 @@ export function renderEditor(main, ctx) {
   function switchTab(t) {
     activeTab = t;
     sessionStorage.setItem('docassembly.editorTab', t);
-    tabs.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
+    tabs.querySelectorAll('button').forEach((b) => { b.classList.toggle('active', b.dataset.tab === t); b.setAttribute('aria-selected', b.dataset.tab === t ? 'true' : 'false'); });
     lastVarKeys = '';
     drawTab();
   }
@@ -255,10 +268,10 @@ export function renderEditor(main, ctx) {
     for (const path of order) {
       const v = vars[path];
       const row = el('tr', { class: v.orphaned ? 'orphan' : '' });
-      const labelIn = el('input', { type: 'text', value: v.label || '', placeholder: labelFor(null, path), onChange: (e) => { v.label = e.target.value.trim(); changed(); } });
-      const typeSel = el('select', TYPES.map((t) => el('option', { value: t, selected: (v.type || 'text') === t }, TYPE_LABELS[t])), { onChange: null });
+      const labelIn = el('input', { type: 'text', 'aria-label': `Label for ${path}`, value: v.label || '', placeholder: labelFor(null, path), onChange: (e) => { v.label = e.target.value.trim(); changed(); } });
+      const typeSel = el('select', { 'aria-label': `Type of ${path}` }, TYPES.map((t) => el('option', { value: t, selected: (v.type || 'text') === t }, TYPE_LABELS[t])), { onChange: null });
       typeSel.addEventListener('change', () => { v.type = typeSel.value; changed(); redrawExtra(); });
-      const req = el('input', { type: 'checkbox', checked: !!v.required, onChange: (e) => { v.required = e.target.checked; changed(); } });
+      const req = el('input', { type: 'checkbox', 'aria-label': `${path} is required`, checked: !!v.required, onChange: (e) => { v.required = e.target.checked; changed(); } });
       const more = el('button.btn.btn-sm.btn-ghost', { type: 'button', title: 'Options, help text, default, formula', onClick: () => { extraRow.classList.toggle('hidden'); more.textContent = extraRow.classList.contains('hidden') ? '⋯' : '▴'; } }, '⋯');
       row.append(el('td.path', { title: v.orphaned ? 'No longer used in the template' : path }, path), el('td', labelIn), el('td', typeSel), el('td', req), el('td', more));
       const extraRow = el('tr.hidden', el('td', { colspan: 5 }));
@@ -267,7 +280,11 @@ export function renderEditor(main, ctx) {
         clear(extraCell);
         const grid = el('div.var-extra');
         if (v.type === 'selection' || v.type === 'multiselect') {
-          grid.appendChild(el('div', { style: { gridColumn: '1 / -1' } }, el('label', 'Options (one per line)'), el('textarea', { rows: 3, value: Array.isArray(v.options) ? v.options.map((o) => (typeof o === 'object' ? o.label : o)).join('\n') : (v.options || ''), onChange: (e) => { v.options = e.target.value.split('\n').map((s) => s.trim()).filter(Boolean); changed(); } })));
+          const inferred = Array.isArray(v.inferredOptions) ? v.inferredOptions.map((o) => (typeof o === 'object' ? o.label : o)) : [];
+          const own = Array.isArray(v.options) ? v.options.map((o) => (typeof o === 'object' ? o.label : o)) : (v.options ? String(v.options).split(/[\n,]/).map((s) => s.trim()).filter(Boolean) : []);
+          grid.appendChild(el('div', { style: { gridColumn: '1 / -1' } }, el('label', 'Options (one per line)'),
+            el('textarea', { rows: 3, 'aria-label': `Options for ${path}`, value: own.join('\n'), placeholder: inferred.length ? inferred.join('\n') : 'One option per line', onChange: (e) => { v.options = e.target.value.split('\n').map((s) => s.trim()).filter(Boolean); changed(); } }),
+            inferred.length && !own.length ? el('div.help.small', 'Found in the template: ', inferred.join(', '), ' — used unless you list your own.') : null));
         }
         if (v.type === 'computed') {
           grid.appendChild(el('div', { style: { gridColumn: '1 / -1' } }, el('label', 'Formula (expression)'), el('input', { type: 'text', class: 'mono', placeholder: 'e.g. Fee * 1.1', value: v.formula || '', onChange: (e) => { v.formula = e.target.value.trim(); changed(); } })));
@@ -305,7 +322,7 @@ export function renderEditor(main, ctx) {
       tabBody.appendChild(el('div.logic-var', el('code', path), ' ', el('span.muted.small', v && v.label ? `— ${v.label}` : ''), ' ', el('span.badge', v ? TYPE_LABELS[v.type] || v.type : '')));
       for (const u of uses || []) {
         tabBody.appendChild(el('div.logic-item',
-          el('div', el('span.badge.badge-accent', u.kind === 'list' ? 'list' : 'if'), ' ', el('span.cond', u.condSrc || '')),
+          el('div', el('span.badge.badge-accent', u.kind === 'list' ? 'list' : 'if'), ' ', el('span.cond', u.condSrc || u.condition || u.src || '')),
           el('div.lines.small', 'Gates ', u.endLine && u.endLine !== u.line ? `lines ${u.line}–${u.endLine}` : `line ${u.line}`, ' ',
             el('a', { href: '#', onClick: (e) => { e.preventDefault(); gotoLine(u.line); } }, 'jump →'))));
       }
@@ -366,6 +383,13 @@ export function renderEditor(main, ctx) {
   updateGutter();
   recompile.flush();
   window.onbeforeunload = () => (dirty ? true : undefined);
+  // Leaving the editor (hash change): flush pending compile + autosave so nothing typed is lost.
+  setLeaveGuard(() => {
+    autosave.cancel(); recompile.cancel();
+    if (dirty || ta.value !== savedText) save(false);
+    window.onbeforeunload = null;
+    return true;
+  });
   ta.focus();
 }
 

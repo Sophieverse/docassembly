@@ -70,9 +70,19 @@ function blocksHtml(blocks) {
   return out;
 }
 
+/** Font names are interpolated into <style>; only allow letters, digits, spaces and hyphens (no quotes, braces, semicolons, tags). */
+export function safeFont(font) {
+  const f = String(font ?? '').replace(/[^\w \-]/g, '').trim();
+  return f || 'Times New Roman';
+}
+
+const num = (v, d) => (Number.isFinite(+v) ? +v : d);
+
 function css({ font, fontSize, margins, lineSpacing }) {
-  const m = typeof margins === 'number' || margins == null ? { top: margins ?? 1, right: margins ?? 1, bottom: margins ?? 1, left: margins ?? 1 } : margins;
-  const f = String(font).replace(/["\\]/g, '');
+  fontSize = num(fontSize, 12); lineSpacing = num(lineSpacing, 1);
+  const m0 = typeof margins === 'object' && margins ? margins : { top: margins, right: margins, bottom: margins, left: margins };
+  const m = { top: num(m0.top, 1), right: num(m0.right, 1), bottom: num(m0.bottom, 1), left: num(m0.left, 1) };
+  const f = safeFont(font);
   return `
 @page { size: letter; margin: ${m.top}in ${m.right}in ${m.bottom}in ${m.left}in; }
 html, body { background: #fff; color: #000; margin: 0; padding: 0; }

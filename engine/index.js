@@ -8,8 +8,8 @@ export { parseExpr, evalExpr, evaluate, collectIdentifiers, collectFunctions, cr
 export { functions, registerFunction, parseDate, formatDate, toISODate, namespaces, methods } from './functions.js';
 export { parse, walk, classifyTag } from './parser.js';
 export { render, renderToBlocks, formatValue, itemVars } from './evaluate.js';
-export { analyze, relevantVariables, questionnaire, dependencyMap, humanize, getPath } from './analyze.js';
-export { createModel, mergeModel, coerce, validate, computeDerived, emptyData, emptyItem, setPath, TYPES } from './model.js';
+export { analyze, relevantVariables, questionnaire, dependencyMap, humanize, getPath, collectAnnotations, parseAnnotationLine, ANNOTATION_KEYS } from './analyze.js';
+export { createModel, mergeModel, applyAnnotations, ANNOTATABLE, coerce, validate, computeDerived, emptyData, emptyItem, setPath, TYPES } from './model.js';
 
 import { parse } from './parser.js';
 import { analyze } from './analyze.js';

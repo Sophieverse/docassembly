@@ -5,6 +5,14 @@
 import * as store from './store.js';
 import { el, clear, toast, confirm, prompt, fmtDate } from './components.js';
 import { navigate } from './router.js';
+import { compile } from './engine-api.js';
+
+/** Syntax check an include-if expression; returns an error message or ''. */
+export function includeIfError(expr) {
+  if (!expr || !expr.trim()) return '';
+  const c = compile(`{[if ${expr}]}1{[end if]}`);
+  return c.errors.length ? c.errors[0].message.replace(/\s*\(line \d+, col \d+\)\s*$/, '') : '';
+}
 
 export function renderPackages(main, ctx) {
   const id = ctx && ctx.params && ctx.params.id;
@@ -76,11 +84,13 @@ function renderPackage(main, id) {
     items.forEach((it, i) => {
       const t = store.templates.get(it.templateId);
       const cond = el('input', { type: 'text', placeholder: 'Include if (optional expression)', value: it.includeIf || '', class: 'mono', 'aria-label': 'Include if' });
-      cond.addEventListener('change', () => { it.includeIf = cond.value.trim(); save(); });
+      const condErr = el('div.error.small', { role: 'alert' }, includeIfError(it.includeIf));
+      cond.addEventListener('change', () => { it.includeIf = cond.value.trim(); condErr.textContent = includeIfError(it.includeIf); cond.classList.toggle('invalid', !!condErr.textContent); save(); });
+      if (condErr.textContent) cond.classList.add('invalid');
       listHost.appendChild(el('div.pkg-item',
         el('span.handle', `${i + 1}.`),
         el('span', t ? el('a', { href: `#/templates/${t.id}` }, t.name) : el('span.badge.badge-danger', 'missing template')),
-        cond,
+        el('div', cond, condErr),
         el('div.flex',
           el('button.btn.btn-sm.btn-ghost', { type: 'button', title: 'Move up', disabled: i === 0, onClick: () => { [items[i - 1], items[i]] = [items[i], items[i - 1]]; save(); draw(); } }, '↑'),
           el('button.btn.btn-sm.btn-ghost', { type: 'button', title: 'Move down', disabled: i === items.length - 1, onClick: () => { [items[i + 1], items[i]] = [items[i], items[i + 1]]; save(); draw(); } }, '↓'),

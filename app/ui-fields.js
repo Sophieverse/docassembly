@@ -5,7 +5,7 @@
  *
  * Question = { path, label, type, required, options?, help?, listPath?, itemFields? }
  */
-import { el, escapeHtml } from './components.js';
+import { el, escapeHtml, confirm } from './components.js';
 import { getPath, setPath, isAnswered } from './docgen.js';
 
 let uid = 0;
@@ -95,6 +95,17 @@ export function fillListFields(questions, model) {
       .filter((v) => v && !v.orphaned && v.type !== 'computed' && (v.listPath === q.path || (v.path || '').startsWith(q.path + '[].')))
       .map((v) => ({ path: itemFieldName(v, q.path), label: shortLabel(v.label, itemFieldName(v, q.path)), type: v.type || 'text', required: !!v.required, options: v.options, help: v.help }));
   }
+  // Model defaults for item fields ("Children[].State" = "Texas") are applied when an item is added.
+  for (const q of questions) {
+    if (q.type !== 'list') continue;
+    const defs = {};
+    for (const v of Object.values(vars)) {
+      if (!v || v.default === undefined || v.orphaned) continue;
+      const p = v.path || '';
+      if (v.listPath === q.path || p.startsWith(q.path + '[].')) defs[itemFieldName(v, q.path)] = v.default;
+    }
+    if (Object.keys(defs).length) q.itemDefaults = { ...(q.itemDefaults || {}), ...defs };
+  }
   return questions;
 }
 
@@ -178,21 +189,25 @@ export function renderQuestion(q, data, onChange, opts = {}) {
     }
     case 'selection': {
       const options = normOptions(q.options);
+      // Stored answers may differ in case from the option list ("Female" vs "female"): still show them selected.
+      const same = (o) => value === o.value || (typeof value === 'string' && value.toLowerCase() === o.value.toLowerCase());
       if (options.length && options.length <= 5) {
-        control = el('div.radios', { id, role: 'radiogroup' }, options.map((o) => el('label', el('input', {
-          type: 'radio', name: id, value: o.value, checked: value === o.value, onChange: () => set(o.value),
+        control = el('div.radios', { id, role: 'radiogroup', 'aria-labelledby': id + '-l' }, options.map((o) => el('label', el('input', {
+          type: 'radio', name: id, value: o.value, checked: same(o), onChange: () => set(o.value),
         }), o.label)));
+        labelEl.id = id + '-l'; labelEl.removeAttribute('for');
       } else {
         control = el('select', { id, onChange: (e) => set(e.target.value || undefined) },
           el('option', { value: '' }, options.length ? '— select —' : '— no options defined —'),
-          options.map((o) => el('option', { value: o.value, selected: value === o.value }, o.label)));
+          options.map((o) => el('option', { value: o.value, selected: same(o) }, o.label)));
       }
       break;
     }
     case 'multiselect': {
       const options = normOptions(q.options);
       const cur = Array.isArray(value) ? value.slice() : [];
-      control = el('div.checks', { id }, options.map((o) => el('label', el('input', {
+      labelEl.id = id + '-l'; labelEl.removeAttribute('for');
+      control = el('div.checks', { id, role: 'group', 'aria-labelledby': id + '-l' }, options.map((o) => el('label', el('input', {
         type: 'checkbox', value: o.value, checked: cur.includes(o.value),
         onChange: (e) => {
           const arr = (getPath(data, q.path) || []).slice();
@@ -263,7 +278,11 @@ function renderList(q, data, onChange, opts) {
         el('span', `${singular(q.label || q.path)} ${i + 1}`), el('span.spacer'),
         el('button.btn.btn-sm.btn-ghost', { type: 'button', title: 'Move up', disabled: i === 0, onClick: () => { [arr[i - 1], arr[i]] = [arr[i], arr[i - 1]]; commit(); } }, '↑'),
         el('button.btn.btn-sm.btn-ghost', { type: 'button', title: 'Move down', disabled: i === arr.length - 1, onClick: () => { [arr[i + 1], arr[i]] = [arr[i], arr[i + 1]]; commit(); } }, '↓'),
-        el('button.btn.btn-sm.btn-ghost', { type: 'button', title: 'Remove', onClick: () => { arr.splice(i, 1); commit(); } }, 'Remove'),
+        el('button.btn.btn-sm.btn-ghost', { type: 'button', title: 'Remove', onClick: async () => {
+          const filled = item && typeof item === 'object' && Object.values(item).some(isAnswered);
+          if (filled && !(await confirm(`Remove ${singular(q.label || q.path).toLowerCase()} ${i + 1}? Its answers will be lost.`, { okLabel: 'Remove', danger: true }))) return;
+          arr.splice(i, 1); commit();
+        } }, 'Remove'),
       );
       card.appendChild(hd);
       if (!fields.length) {
@@ -278,7 +297,7 @@ function renderList(q, data, onChange, opts) {
     });
   }
   draw();
-  box.appendChild(el('button.btn.btn-sm', { type: 'button', onClick: () => { items().push({}); commit(); } }, `+ Add ${singular(q.label || q.path).toLowerCase()}`));
+  box.appendChild(el('button.btn.btn-sm', { type: 'button', onClick: () => { const item = {}; for (const [k, v] of Object.entries(q.itemDefaults || {})) setPath(item, k, JSON.parse(JSON.stringify(v))); items().push(item); commit(); } }, `+ Add ${singular(q.label || q.path).toLowerCase()}`));
   return box;
 }
 
