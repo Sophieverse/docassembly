@@ -3,10 +3,11 @@
  * #/records and #/records/:id — client/matter records.
  */
 import * as store from './store.js';
-import { el, clear, toast, confirm, prompt, modal, download, pickFile, readFileText, fmtDate, safeFilename } from './components.js';
+import { el, clear, toast, confirm, prompt, modal, download, pickFile, readFileText, fmtDate, safeFilename, debounce } from './components.js';
 import { navigate } from './router.js';
-import { renderQuestion } from './ui-fields.js';
+import { renderQuestion, applyFieldErrors, ownerOf } from './ui-fields.js';
 import { labelFor, modelFor, pruneEmpty } from './docgen.js';
+import { validate, computeDerived } from './engine-api.js';
 
 export function renderRecords(main, ctx) {
   const id = ctx && ctx.params && ctx.params.id;
@@ -74,19 +75,31 @@ function runWith(record) {
   const m = modal({ title: `Run with "${record.name}"`, body });
 }
 
-/** Union of all templates' model variables → question list (top-level, grouped into objects). */
-export function unionQuestions(templates) {
+/**
+ * Union of all templates' model variables (first template wins per path; computed variables included
+ * so validation rules that read them can run). Returns a Model { variables, order }.
+ */
+export function unionModel(templates) {
   const vars = {};
   for (const t of templates) {
     // Templates that were never opened in the editor may have no model yet: derive one from the text.
     let m = t.model && t.model.variables ? t.model.variables : {};
     if (!Object.keys(m).length && t.text) m = modelFor(t.text).variables || {};
     for (const [path, v] of Object.entries(m)) {
-      if (!v || v.orphaned || v.type === 'computed') continue;
+      if (!v || v.orphaned) continue;
       if (!vars[path]) vars[path] = { ...v, path, label: v.label || labelFor(t.model, path) };
       else if (!vars[path].options && v.options) vars[path].options = v.options;
     }
   }
+  return { variables: vars, order: Object.keys(vars) };
+}
+
+const RULE_KEYS = ['min', 'max', 'minLength', 'maxLength', 'pattern', 'default'];
+
+/** Union of all templates' model variables → question list (top-level, grouped into objects). */
+export function unionQuestions(templates) {
+  const vars = {};
+  for (const [path, v] of Object.entries(unionModel(templates).variables)) if (v.type !== 'computed') vars[path] = v;
   // Build tree: object/list parents with itemFields ("Children[].Name" belongs to list "Children")
   const paths = Object.keys(vars);
   const isChildOf = (p, parent) => p.startsWith(parent + '.') || p.startsWith(parent + '[].');
@@ -96,6 +109,8 @@ export function unionQuestions(templates) {
   const build = (path) => {
     const v = vars[path];
     const q = { path, label: v.label, type: v.type, required: !!v.required, options: v.options, help: v.help };
+    for (const k of RULE_KEYS) if (v[k] !== undefined && v[k] !== null && v[k] !== '') q[k] = v[k];
+    if (v.type === 'list' && v.itemType) q.itemType = v.itemType;
     if (v.type === 'object' || v.type === 'list') {
       q.itemFields = paths.filter((p) => isChildOf(p, path) && !parents.some((pp) => pp !== path && isChildOf(pp, path) && isChildOf(p, pp)))
         .map((p) => { consumed.add(p); return build(p); });
@@ -125,7 +140,28 @@ function renderRecord(main, id) {
   if (!r) { main.appendChild(el('div.card', 'Record not found. ', el('a', { href: '#/records' }, 'Back to records'))); return; }
   const data = JSON.parse(JSON.stringify(r.data || {}));
   let dirty = false;
-  const questions = unionQuestions(store.templates.list());
+  const templates = store.templates.list();
+  const questions = unionQuestions(templates);
+  const model = unionModel(templates);
+  /** Validation across every template's rules — advisory only (a record may serve templates with different rules). */
+  const validationNote = el('div.warn-list.small.hidden', { role: 'status' });
+  function checkAnswers() {
+    const errors = new Map();
+    try {
+      let full = data;
+      try { const r = computeDerived(model, data); if (r && r.data) full = r.data; } catch (e) { /* ignore */ }
+      for (const e of validate(model, full) || []) {
+        if (!e || !e.path || errors.has(e.path) || /is required$/.test(e.message)) continue; // blanks are fine in a record
+        if (!ownerOf(e.path, questions)) continue;
+        errors.set(e.path, e.message);
+      }
+    } catch (e) { console.warn('record validation failed', e); }
+    applyFieldErrors(formHost, errors);
+    validationNote.classList.toggle('hidden', !errors.size);
+    validationNote.textContent = errors.size ? `${errors.size} answer${errors.size === 1 ? '' : 's'} would fail a template's validation rule. You can still save; the questionnaire will ask you to fix it before generating.` : '';
+    return errors;
+  }
+  const scheduleCheck = debounce(checkAnswers, 400);
 
   const saveBtn = el('button.btn.btn-primary', { type: 'button', onClick: save }, 'Save');
   main.appendChild(el('div.page-head',
@@ -164,7 +200,9 @@ function renderRecord(main, id) {
     clear(formHost);
     if (!questions.length) { formHost.appendChild(el('p.muted', 'No template variables are defined yet, so there is no form to show. Use the Raw JSON tab, or open a template first.')); return; }
     formHost.appendChild(el('p.muted.small', 'This form is the union of every variable used by your templates. Leave anything blank that does not apply.'));
-    for (const q of questions) formHost.appendChild(renderQuestion(q, data, () => { dirty = true; ta.value = JSON.stringify(data, null, 2); }));
+    formHost.appendChild(validationNote);
+    for (const q of questions) formHost.appendChild(renderQuestion(q, data, () => { dirty = true; ta.value = JSON.stringify(data, null, 2); scheduleCheck(); }));
+    checkAnswers();
     // Extra keys not covered by any template
     const known = new Set(questions.map((q) => q.path.split('.')[0]));
     const extra = Object.keys(data).filter((k) => !known.has(k));

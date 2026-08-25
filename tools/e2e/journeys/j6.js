@@ -1,0 +1,30 @@
+const { connect, URL, fixture, outFile, done } = require('../lib.js');
+(async () => {
+  const c = await connect();
+  const report = c.report;
+  await c.goto(URL + '#/templates'); await c.wait(400);
+  await c.eval(`(() => { const o = HTMLInputElement.prototype.click; window.__fileInput = null; HTMLInputElement.prototype.click = function() { if (this.type === 'file') { window.__fileInput = this; } else o.call(this); }; return true; })()`);
+  await c.eval(`[...document.querySelectorAll('.page-head button')].find(b => b.textContent === 'Import .docx').click(); true`); await c.wait(200);
+  await c.send('DOM.getDocument', { depth: 0 });
+  const objectId = (await c.send('Runtime.evaluate', { expression: 'window.__fileInput' })).result.objectId;
+  const { nodeId } = await c.send('DOM.requestNode', { objectId });
+  await c.send('DOM.setFileInputFiles', { files: [fixture('import-test2.docx')], nodeId });
+  await c.wait(600);
+  console.log('import-mode modal:', await c.eval('[...document.querySelectorAll(".modal .import-mode strong")].map(b => b.textContent)'));
+  await c.eval(`[...document.querySelectorAll('.modal .import-mode')].find(b => b.textContent.includes('Convert')).click(); true`);
+  await c.wait(1500); report('import docx');
+  console.log('hash:', await c.eval('location.hash'), 'title:', await c.eval('document.querySelector("h1").textContent'));
+  const text = await c.eval('document.querySelector(".editor-textarea").value');
+  console.log('--- imported text ---\n' + text + '\n---');
+  console.log('checks:', { heading: /^# ENGAGEMENT AGREEMENT/m.test(text), h2: /^## Scope/m.test(text), bold: text.includes('**{[Client.FullName]}**'), split1: text.includes('{[Client.FullName]}') && text.split('{[Client.FullName]}').length >= 3, split2: text.includes('{[Fee|currency]}'), ifblock: text.includes('{[if IsMarried]}') && text.includes('{[end if]}'), numbered: /^1\. First/m.test(text) && /^2\. Second/m.test(text), table: /^\|Item\|Amount\|/m.test(text) && text.includes('{[Retainer|currency]}') });
+  console.log('status:', await c.eval('document.querySelector(".editor-status").textContent'));
+  console.log('vars:', await c.eval(`[...document.querySelectorAll('table.vars tbody tr:not(.hidden) td.path')].map(n => n.textContent)`));
+  await c.shot('13-import-docx.png');
+  await c.eval('window.onbeforeunload=null; true');
+  // preview renders
+  await c.eval(`document.querySelector('.tabs button[data-tab=preview]').click(); true`); await c.wait(500);
+  console.log('preview html has table+ol:', await c.eval('!!document.querySelector(".preview-doc table") && !!document.querySelector(".preview-doc ol")'));
+  report('preview imported');
+  console.log('LOGS:', c.logs);
+  done(c);
+})().catch((e) => { console.error('FATAL', e); process.exit(1); });

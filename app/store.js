@@ -43,7 +43,14 @@ export function sanitizeItem(kind, item) {
     const m = plainObject(item.model) ? item.model : {};
     out.model = { variables: plainObject(m.variables) ? m.variables : {}, order: Array.isArray(m.order) ? m.order.filter((x) => typeof x === 'string') : [] };
     for (const k of Object.keys(out.model.variables)) if (BAD_KEYS.has(k) || !plainObject(out.model.variables[k])) delete out.model.variables[k];
-    if (item.docxOrigin != null) out.docxOrigin = str(item.docxOrigin);
+    // docxOrigin = base64 of the original Word file (Word-template mode); docxName = its file name.
+    // Legacy: docxOrigin used to hold the file name of a converted import → move it to docxName.
+    if (item.docxName != null) out.docxName = str(item.docxName);
+    if (item.docxOrigin != null) {
+      const o = str(item.docxOrigin);
+      if (/\.docx?$/i.test(o) && o.length < 260) { if (!out.docxName) out.docxName = o; delete out.docxOrigin; }
+      else out.docxOrigin = o;
+    }
     if (item.sampleAnswers != null && !plainObject(item.sampleAnswers)) delete out.sampleAnswers;
   } else if (kind === 'records') {
     out.data = plainObject(item.data) ? item.data : {};
@@ -194,9 +201,10 @@ export const templates = collection('templates');
 export const records = collection('records');
 export const packages = collection('packages');
 
-export function newTemplate({ name = 'Untitled template', description = '', text = '', model = null, folder = '', docxOrigin } = {}) {
+export function newTemplate({ name = 'Untitled template', description = '', text = '', model = null, folder = '', docxOrigin, docxName } = {}) {
   const t = { id: genId('tpl'), name, description, text, model: model || { variables: {}, order: [] }, folder, createdAt: now(), updatedAt: now() };
   if (docxOrigin) t.docxOrigin = docxOrigin;
+  if (docxName) t.docxName = docxName;
   return templates.put(t);
 }
 

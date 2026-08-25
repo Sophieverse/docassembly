@@ -5,8 +5,8 @@
 import * as store from './store.js';
 import { el, clear, toast, confirm, prompt, modal, download, pickFile, readFileBytes, readFileText, fmtDate, safeFilename } from './components.js';
 import { navigate } from './router.js';
-import { variableCount } from './docgen.js';
-import { readDocx, compile, createModel } from './engine-api.js';
+import { variableCount, bytesToBase64, isWordTemplate } from './docgen.js';
+import { readDocx, compile, createModel, extractTemplateText, textToBlocks, buildDocx } from './engine-api.js';
 import { samples, loadSample, loadAllSamples } from './main.js';
 
 export function renderTemplates(main) {
@@ -15,6 +15,7 @@ export function renderTemplates(main) {
 
   const actions = el('div.actions',
     el('button.btn', { type: 'button', onClick: importDocx }, 'Import .docx'),
+    el('button.btn.btn-ghost', { type: 'button', title: 'A small Word file with {[ ]} tags: open it in Word to see how a Word template is written, then import it as a Word template', onClick: downloadExampleDocx }, 'Example Word template ↓'),
     el('button.btn', { type: 'button', onClick: importJson }, 'Import JSON'),
     samples.length ? el('button.btn', { type: 'button', onClick: pickSample }, 'Load sample') : null,
     el('button.btn.btn-primary', { type: 'button', onClick: createBlank }, '+ New template'),
@@ -29,6 +30,7 @@ export function renderTemplates(main) {
         el('button.btn.btn-primary', { type: 'button', onClick: createBlank }, 'Create a blank template'),
         samples.length ? el('button.btn', { type: 'button', onClick: () => { const n = loadAllSamples(); toast(`Loaded ${n} samples`, 'ok'); renderTemplates(main); } }, `Load ${samples.length} sample templates`) : null,
         el('button.btn', { type: 'button', onClick: importDocx }, 'Import a .docx'),
+        el('button.btn.btn-ghost', { type: 'button', onClick: downloadExampleDocx }, 'Download example Word template'),
       ),
     ));
     return;
@@ -48,7 +50,7 @@ export function renderTemplates(main) {
       if (q && !(t.name + ' ' + (t.description || '')).toLowerCase().includes(q)) continue;
       const errs = compile(t.text || '').errors || [];
       tb.appendChild(el('tr',
-        el('td', el('a.rowlink', { href: `#/templates/${t.id}` }, el('span.name', t.name)), t.docxOrigin ? el('span.badge', { style: { marginLeft: '.4rem' }, title: 'Imported from ' + t.docxOrigin }, 'docx') : null, errs.length ? el('span.badge.badge-danger', { style: { marginLeft: '.4rem' }, title: errs[0].message }, `${errs.length} error${errs.length > 1 ? 's' : ''}`) : null),
+        el('td', el('a.rowlink', { href: `#/templates/${t.id}` }, el('span.name', t.name)), isWordTemplate(t) ? el('span.badge.badge-accent', { style: { marginLeft: '.4rem' }, title: `Word template — ${t.docxName || 'original .docx kept'}; tags are filled in place and all Word formatting is preserved` }, 'Word') : t.docxName ? el('span.badge', { style: { marginLeft: '.4rem' }, title: 'Converted from ' + t.docxName }, 'docx') : null, errs.length ? el('span.badge.badge-danger', { style: { marginLeft: '.4rem' }, title: errs[0].message }, `${errs.length} error${errs.length > 1 ? 's' : ''}`) : null),
         el('td.muted', t.description || ''),
         el('td.right', String(variableCount(t))),
         el('td.muted.nowrap', fmtDate(t.updatedAt)),
@@ -81,22 +83,74 @@ export function renderTemplates(main) {
   }
 }
 
+/** Ask how to import a .docx: convert to editable text, or keep the Word file and fill its tags in place. */
+export function chooseImportMode(fileName) {
+  let choice = null;
+  const m = modal({
+    title: `Import ${fileName}`,
+    body: el('div',
+      el('div.import-choice',
+        el('button.btn.import-mode', { type: 'button', onClick: () => { choice = 'convert'; m.close('ok'); } },
+          el('strong', 'Convert to editable text template'),
+          el('div.muted.small', 'The document becomes template text you edit here. Headings, bold/italic, lists and tables are kept in a simple markdown-like form; other Word formatting is dropped.')),
+        el('button.btn.import-mode', { type: 'button', onClick: () => { choice = 'word'; m.close('ok'); } },
+          el('strong', 'Keep as Word template'),
+          el('div.muted.small', 'Preserves all Word formatting — styles, headers/footers, numbering, tables, fonts. The {[ ]} tags are resolved in place. Edit the tags in Word and re-upload the file.')),
+      )),
+    buttons: [{ label: 'Cancel', value: null }],
+  });
+  return m.promise.then((v) => (v === 'ok' ? choice : null));
+}
+
+/** Build a template from a Word file. mode: 'convert' | 'word'. Returns the stored template (throws on unreadable files). */
+export async function templateFromDocx(bytes, fileName, mode) {
+  const name = fileName.replace(/\.docx$/i, '');
+  const text = mode === 'word' ? await extractTemplateText(bytes) : (await readDocx(bytes)).text;
+  const c = compile(text || '');
+  let model = { variables: {}, order: [] };
+  try { if (!c.errors.length) model = createModel(c.analysis); } catch (e) { /* model later */ }
+  const t = store.newTemplate({ name, text: text || '', model, docxName: fileName, ...(mode === 'word' ? { docxOrigin: bytesToBase64(bytes) } : {}) });
+  return { template: t, errors: c.errors || [] };
+}
+
 export async function importDocx() {
   const file = await pickFile('.docx');
   if (!file) return;
   try {
     const bytes = await readFileBytes(file);
-    const { text } = await readDocx(bytes);
-    const name = file.name.replace(/\.docx$/i, '');
-    const c = compile(text || '');
-    let model = { variables: {}, order: [] };
-    try { if (!c.errors.length) model = createModel(c.analysis); } catch (e) { /* model later */ }
-    const t = store.newTemplate({ name, text: text || '', model, docxOrigin: file.name });
-    toast(`Imported "${name}"${c.errors.length ? ` with ${c.errors.length} syntax issue(s)` : ''}`, c.errors.length ? '' : 'ok');
+    const mode = await chooseImportMode(file.name);
+    if (!mode) return;
+    const { template: t, errors } = await templateFromDocx(bytes, file.name, mode);
+    toast(`Imported "${t.name}"${mode === 'word' ? ' as a Word template' : ''}${errors.length ? ` with ${errors.length} syntax issue(s)` : ''}`, errors.length ? '' : 'ok');
     navigate(`/templates/${t.id}`);
   } catch (e) {
     console.error(e);
     toast('Could not read that .docx: ' + (e.message || e), 'error', 6000);
+  }
+}
+
+/**
+ * Text of the example Word template: the tutorial sample with every multi-line comment split into one
+ * comment per line, so each {[ ]} tag stays inside a single Word paragraph.
+ */
+export function exampleWordTemplateText() {
+  const s = samples.find((x) => x.id === 'tutorial') || samples[0];
+  const src = s ? s.text : '# {[DocumentTitle]}\n\nThis agreement is made on {[SigningDate|format:"long"]} between {[Client.FullName]} and {[FirmName]}.\n';
+  return src.replace(/\{\[#([\s\S]*?)\]\}/g, (m, body) => {
+    if (!body.includes('\n')) return m;
+    return body.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => `{[# ${l} ]}`).join('\n');
+  });
+}
+
+/** Build the example .docx on the fly (tags are literal text in the paragraphs) and download it. */
+export async function downloadExampleDocx() {
+  try {
+    const bytes = await buildDocx(textToBlocks(exampleWordTemplateText()), { title: 'Example Word template' });
+    download('example-word-template.docx', new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }));
+    toast('Open it in Word to see the tags, then import it with "Keep as Word template".', 'ok', 5000);
+  } catch (e) {
+    console.error(e);
+    toast('Could not build the example: ' + (e.message || e), 'error', 6000);
   }
 }
 

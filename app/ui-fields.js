@@ -93,7 +93,12 @@ export function fillListFields(questions, model) {
     if (q.type !== 'list' || (q.itemFields && q.itemFields.length)) continue;
     q.itemFields = Object.values(vars)
       .filter((v) => v && !v.orphaned && v.type !== 'computed' && (v.listPath === q.path || (v.path || '').startsWith(q.path + '[].')))
-      .map((v) => ({ path: itemFieldName(v, q.path), label: shortLabel(v.label, itemFieldName(v, q.path)), type: v.type || 'text', required: !!v.required, options: v.options, help: v.help }));
+      .map((v) => {
+        const f = { path: itemFieldName(v, q.path), label: shortLabel(v.label, itemFieldName(v, q.path)), type: v.type || 'text', required: !!v.required, options: v.options, help: v.help };
+        for (const k of ['min', 'max', 'minLength', 'maxLength', 'pattern', 'default']) if (v[k] !== undefined && v[k] !== null && v[k] !== '') f[k] = v[k];
+        if (v.fromTemplate) f.fromTemplate = v.fromTemplate;
+        return f;
+      });
   }
   // Model defaults for item fields ("Children[].State" = "Texas") are applied when an item is added.
   for (const q of questions) {
@@ -125,7 +130,7 @@ export function patchGroup(groupNode, q, data, onChange, opts = {}) {
   let cursor = fs.querySelector(':scope > .q:not([data-leaving])');
   for (const f of wanted) {
     let n = existing.get(f.path);
-    if (!n) { n = renderQuestion(f, sub, (p, v) => onChange(q.path + '.' + p, v), opts); fs.insertBefore(n, cursor); continue; }
+    if (!n) { n = renderQuestion(f, sub, (p, v) => onChange(q.path + '.' + p, v), { ...opts, prefix: fullPath(opts.prefix, q.path) }); fs.insertBefore(n, cursor); continue; }
     if (n !== cursor) fs.insertBefore(n, cursor); else cursor = nextField(cursor);
   }
   return true;
@@ -139,34 +144,91 @@ function shortLabel(label, rel) {
   return parts.length > 1 ? parts.slice(-rel.split('.').length).join(' — ') : label;
 }
 
+/** Concrete full path of a field: prefix "Members[1]" + "Percent" → "Members[1].Percent". */
+export function fullPath(prefix, rel) { return prefix ? `${prefix}.${rel}` : rel; }
+
+/**
+ * Apply a Map<concretePath, message> to already-rendered fields under `host`: marks `.q[data-full]`
+ * invalid and shows/removes the inline `.error` line without re-rendering (so focus is kept).
+ * List-level errors ("Members") show under the list header. Returns the number of fields marked.
+ */
+export function applyFieldErrors(host, errors) {
+  let n = 0;
+  for (const wrap of host.querySelectorAll('.q[data-full]')) {
+    const msg = errors && errors.get(wrap.dataset.full);
+    const list = wrap.querySelector(':scope > .list-field');
+    const holder = list || wrap;
+    const old = holder.querySelector(':scope > .error');
+    if (msg) {
+      n++;
+      wrap.classList.add('invalid');
+      if (old) old.textContent = msg;
+      else {
+        const e = el('div.error', { role: 'alert' }, msg);
+        if (list) list.insertBefore(e, list.firstChild.nextSibling); else wrap.appendChild(e);
+      }
+    } else {
+      wrap.classList.remove('invalid');
+      if (old) old.remove();
+    }
+  }
+  return n;
+}
+
+/** min/max/minlength/maxlength/pattern HTML attributes for a question, by control kind. */
+function ruleAttrs(q, kind) {
+  const a = {};
+  if (kind === 'number' || kind === 'date') { if (q.min !== undefined) a.min = q.min; if (q.max !== undefined) a.max = q.max; }
+  if (kind === 'text') {
+    if (q.minLength !== undefined) a.minlength = q.minLength;
+    if (q.maxLength !== undefined) a.maxlength = q.maxLength;
+    if (q.pattern) a.pattern = q.pattern;
+  }
+  return a;
+}
+
+/** <datalist> for q.suggestions (literals the template compares against). */
+function datalistFor(q, id) {
+  const s = Array.isArray(q.suggestions) ? q.suggestions.map((o) => (typeof o === 'object' ? o.value : o)).filter((x) => x != null && x !== '') : [];
+  if (!s.length) return null;
+  return el('datalist', { id: id + '-dl' }, s.map((v) => el('option', { value: String(v) })));
+}
+
 /**
  * Render a question. `data` is the root (or the list item) object. onChange(path, value) is
  * called with the *relative* path within `data` after every change.
- * opts: { compact, errors: Map<path,string> }
+ * opts: { compact, errors: Map<concretePath,string>, prefix: concrete path of `data` ('' at the root) }
  */
 export function renderQuestion(q, data, onChange, opts = {}) {
-  const value = getPath(data, q.path);
   const id = nextId();
   const type = q.type || 'text';
-  const wrap = el('div.q.field', { dataset: { path: q.path, type } });
-  if (opts.errors && opts.errors.get(q.path)) wrap.classList.add('invalid');
+  const full = fullPath(opts.prefix, q.path);
+  // Model default: fill a blank answer so the document and the control agree.
+  if (q.default !== undefined && q.default !== null && q.default !== '' && !isAnswered(getPath(data, q.path)) && type !== 'object' && type !== 'list' && type !== 'computed') {
+    setPath(data, q.path, JSON.parse(JSON.stringify(q.default)));
+  }
+  const value = getPath(data, q.path);
+  const wrap = el('div.q.field', { dataset: { path: q.path, type, full } });
+  const err = opts.errors && opts.errors.get(full);
+  if (err) wrap.classList.add('invalid');
 
   const labelEl = el('label', { for: id }, q.label || q.path, q.required ? el('span.req', { title: 'Required' }, '*') : null);
   if (type !== 'object' && type !== 'list') wrap.appendChild(labelEl);
 
   let control;
   const set = (v) => { setPath(data, q.path, v); onChange(q.path, v); };
+  const subOpts = { ...opts, prefix: full };
 
   switch (type) {
     case 'longtext':
-      control = el('textarea', { id, rows: opts.compact ? 2 : 4, value: value == null ? '' : value, onInput: (e) => set(e.target.value || undefined) });
+      control = el('textarea', { id, rows: opts.compact ? 2 : 4, value: value == null ? '' : value, ...ruleAttrs(q, 'text'), onInput: (e) => set(e.target.value || undefined) });
       break;
     case 'number':
-      control = el('input', { id, type: 'number', step: 'any', value: value == null ? '' : value, onInput: (e) => set(e.target.value === '' ? undefined : Number(e.target.value)) });
+      control = el('input', { id, type: 'number', step: 'any', value: value == null ? '' : value, ...ruleAttrs(q, 'number'), onInput: (e) => set(e.target.value === '' ? undefined : Number(e.target.value)) });
       break;
     case 'currency': {
       const input = el('input', {
-        id, type: 'text', inputmode: 'decimal', placeholder: '0.00',
+        id, type: 'text', inputmode: 'decimal', placeholder: '0.00', ...ruleAttrs(q, 'number'),
         value: value == null || value === '' ? '' : fmtMoneyInput(value),
         onFocus: (e) => { if (value != null) e.target.value = String(getPath(data, q.path) ?? ''); e.target.select(); },
         onInput: (e) => { const n = parseMoney(e.target.value); set(e.target.value.trim() === '' ? undefined : (isNaN(n) ? undefined : n)); },
@@ -176,7 +238,7 @@ export function renderQuestion(q, data, onChange, opts = {}) {
       break;
     }
     case 'date':
-      control = el('input', { id, type: 'date', value: value || '', onInput: (e) => set(e.target.value || undefined) });
+      control = el('input', { id, type: 'date', value: value || '', ...ruleAttrs(q, 'date'), onInput: (e) => set(e.target.value || undefined) });
       break;
     case 'boolean': {
       const yes = el('button', { type: 'button', class: value === true ? 'on' : '', 'aria-pressed': value === true }, 'Yes');
@@ -225,42 +287,58 @@ export function renderQuestion(q, data, onChange, opts = {}) {
       setPath(data, q.path, sub);
       for (const f of q.itemFields || []) {
         const rel = itemFieldName(f, q.path);
-        fs.appendChild(renderQuestion({ ...f, path: rel }, sub, (p, v) => onChange(q.path + '.' + p, v), opts));
+        fs.appendChild(renderQuestion({ ...f, path: rel }, sub, (p, v) => onChange(q.path + '.' + p, v), subOpts));
       }
       if (q.help) fs.appendChild(el('div.help.mb', q.help));
       wrap.appendChild(fs);
       return wrap;
     }
     case 'list': {
-      wrap.appendChild(renderList(q, data, onChange, opts));
+      wrap.appendChild(renderList(q, data, onChange, { ...opts, full }));
       return wrap;
     }
     case 'email':
-      control = el('input', { id, type: 'email', value: value == null ? '' : value, onInput: (e) => set(e.target.value || undefined) });
+      control = el('input', { id, type: 'email', value: value == null ? '' : value, ...ruleAttrs(q, 'text'), onInput: (e) => set(e.target.value || undefined) });
       break;
     case 'phone':
-      control = el('input', { id, type: 'tel', value: value == null ? '' : value, onInput: (e) => set(e.target.value || undefined) });
+      control = el('input', { id, type: 'tel', value: value == null ? '' : value, ...ruleAttrs(q, 'text'), onInput: (e) => set(e.target.value || undefined) });
       break;
     case 'computed':
       control = el('input', { id, type: 'text', value: value == null ? '' : String(value), readonly: true, title: 'Computed automatically' });
       break;
-    default:
-      control = el('input', { id, type: 'text', value: value == null ? '' : value, onInput: (e) => set(e.target.value || undefined) });
+    default: {
+      const dl = datalistFor(q, id);
+      control = el('input', { id, type: 'text', value: value == null ? '' : value, ...ruleAttrs(q, 'text'), list: dl ? dl.id : null, autocomplete: dl ? 'off' : null, onInput: (e) => set(e.target.value || undefined) });
+      if (dl) control = el('div.datalist-wrap', control, dl);
+    }
   }
   wrap.appendChild(control);
   if (q.help) wrap.appendChild(el('div.help', q.help));
-  if (opts.errors && opts.errors.get(q.path)) wrap.appendChild(el('div.error', opts.errors.get(q.path)));
+  if (err) wrap.appendChild(el('div.error', { role: 'alert' }, err));
   return wrap;
+}
+
+/** "at least 2 · at most 5" for a list's item-count rules; '' when none. */
+function countHint(q) {
+  const parts = [];
+  if (q.minLength !== undefined && q.minLength > 0) parts.push(`at least ${q.minLength}`);
+  if (q.maxLength !== undefined) parts.push(`at most ${q.maxLength}`);
+  return parts.join(' · ');
 }
 
 function renderList(q, data, onChange, opts) {
   const box = el('div.list-field');
-  const head = el('div.flex', el('label', q.label || q.path, q.required ? el('span.req', '*') : null));
+  const hint = countHint(q);
+  const head = el('div.flex', el('label', q.label || q.path, q.required ? el('span.req', '*') : null), hint ? el('span.muted.small', { title: 'Number of items allowed' }, hint) : null);
   box.appendChild(head);
   if (q.help) box.appendChild(el('div.help.mb', q.help));
   const itemsHost = el('div');
   box.appendChild(itemsHost);
   const fields = q.itemFields || [];
+  const simple = q.itemType === 'text' && !fields.length; // list of plain strings
+  const min = q.minLength !== undefined ? Number(q.minLength) : 0;
+  const max = q.maxLength !== undefined ? Number(q.maxLength) : Infinity;
+  const noun = singular(q.label || q.path).toLowerCase();
 
   function items() {
     let arr = getPath(data, q.path);
@@ -268,36 +346,61 @@ function renderList(q, data, onChange, opts) {
     return arr;
   }
   function commit() { onChange(q.path, items()); draw(); }
+  const addBtn = el('button.btn.btn-sm', { type: 'button', onClick: () => {
+    if (items().length >= max) return;
+    if (simple) { items().push(''); commit(); return; }
+    const item = {};
+    for (const [k, v] of Object.entries(q.itemDefaults || {})) setPath(item, k, JSON.parse(JSON.stringify(v)));
+    for (const f of fields) { const rel = itemFieldName(f, q.path); if (f.default !== undefined && f.default !== null && f.default !== '' && getPath(item, rel) === undefined) setPath(item, rel, JSON.parse(JSON.stringify(f.default))); }
+    items().push(item); commit();
+  } }, `+ Add ${noun}`);
   function draw() {
     itemsHost.innerHTML = '';
     const arr = items();
+    const canRemove = arr.length > min;
+    addBtn.disabled = arr.length >= max;
+    addBtn.title = arr.length >= max ? `At most ${max} ${max === 1 ? noun : q.label || q.path} allowed` : '';
     if (!arr.length) itemsHost.appendChild(el('div.muted.small.mb', 'None yet. Click "Add" to add one.'));
     arr.forEach((item, i) => {
-      const card = el('div.list-item');
+      const itemFull = `${opts.full || q.path}[${i}]`;
+      if (simple) {
+        // Plain values: one text box per item, the list itself is a string[].
+        const row = el('div.list-item.list-item-simple', { dataset: { full: itemFull } });
+        const input = el('input', { type: 'text', 'aria-label': `${noun} ${i + 1}`, value: item == null ? '' : String(item), onInput: (e) => { arr[i] = e.target.value; onChange(q.path, arr); } });
+        row.append(el('span.muted.small.idx', String(i + 1) + '.'), input,
+          el('button.btn.btn-sm.btn-ghost', { type: 'button', title: 'Move up', disabled: i === 0, onClick: () => { [arr[i - 1], arr[i]] = [arr[i], arr[i - 1]]; commit(); } }, '↑'),
+          el('button.btn.btn-sm.btn-ghost', { type: 'button', title: 'Move down', disabled: i === arr.length - 1, onClick: () => { [arr[i + 1], arr[i]] = [arr[i], arr[i + 1]]; commit(); } }, '↓'),
+          el('button.btn.btn-sm.btn-ghost', { type: 'button', title: canRemove ? 'Remove' : `At least ${min} required`, disabled: !canRemove, onClick: () => { arr.splice(i, 1); commit(); } }, 'Remove'));
+        itemsHost.appendChild(row);
+        return;
+      }
+      const card = el('div.list-item', { dataset: { full: itemFull } });
       const hd = el('div.list-item-head',
         el('span', `${singular(q.label || q.path)} ${i + 1}`), el('span.spacer'),
         el('button.btn.btn-sm.btn-ghost', { type: 'button', title: 'Move up', disabled: i === 0, onClick: () => { [arr[i - 1], arr[i]] = [arr[i], arr[i - 1]]; commit(); } }, '↑'),
         el('button.btn.btn-sm.btn-ghost', { type: 'button', title: 'Move down', disabled: i === arr.length - 1, onClick: () => { [arr[i + 1], arr[i]] = [arr[i], arr[i + 1]]; commit(); } }, '↓'),
-        el('button.btn.btn-sm.btn-ghost', { type: 'button', title: 'Remove', onClick: async () => {
+        el('button.btn.btn-sm.btn-ghost', { type: 'button', title: canRemove ? 'Remove' : `At least ${min} required`, disabled: !canRemove, onClick: async () => {
+          if (!canRemove) return;
           const filled = item && typeof item === 'object' && Object.values(item).some(isAnswered);
-          if (filled && !(await confirm(`Remove ${singular(q.label || q.path).toLowerCase()} ${i + 1}? Its answers will be lost.`, { okLabel: 'Remove', danger: true }))) return;
+          if (filled && !(await confirm(`Remove ${noun} ${i + 1}? Its answers will be lost.`, { okLabel: 'Remove', danger: true }))) return;
           arr.splice(i, 1); commit();
         } }, 'Remove'),
       );
       card.appendChild(hd);
+      const itemOpts = { ...opts, prefix: itemFull };
       if (!fields.length) {
         // No known fields: allow a single free-text value keyed "Value"
-        card.appendChild(renderQuestion({ path: 'Value', label: 'Value', type: 'text' }, item, () => onChange(q.path, arr), opts));
+        card.appendChild(renderQuestion({ path: 'Value', label: 'Value', type: 'text' }, item, () => onChange(q.path, arr), itemOpts));
       }
       for (const f of fields) {
         const rel = itemFieldName(f, q.path);
-        card.appendChild(renderQuestion({ ...f, path: rel }, item, () => onChange(q.path, arr), opts));
+        card.appendChild(renderQuestion({ ...f, path: rel }, item, () => onChange(q.path, arr), itemOpts));
       }
       itemsHost.appendChild(card);
     });
   }
   draw();
-  box.appendChild(el('button.btn.btn-sm', { type: 'button', onClick: () => { const item = {}; for (const [k, v] of Object.entries(q.itemDefaults || {})) setPath(item, k, JSON.parse(JSON.stringify(v))); items().push(item); commit(); } }, `+ Add ${singular(q.label || q.path).toLowerCase()}`));
+  box.appendChild(addBtn);
   return box;
 }
 

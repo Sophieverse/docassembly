@@ -75,6 +75,35 @@ The Client is single.
 <p>Types are inferred from how a variable is used, and can be changed in the editor's <strong>Variables</strong> tab: text, long text, number, currency, date, Yes/No, selection (one of a list), multi-select, object (group of fields), list (repeating group) and computed (a formula, never asked).</p>
 <p>Inference: used alone in <code>if</code> → Yes/No · <code>|currency</code> → currency · <code>|format</code> or name ending in <em>Date</em>/<em>DOB</em> → date · <code>list X</code> / <code>count(X)</code> → list · <code>X.Y</code> → X is an object · otherwise text.</p>
 
+<h2>Annotations (questionnaire settings inside the template)</h2>
+<p>A comment line that starts with <code>@</code> sets a questionnaire property, so the template stays the single source of truth. Write <code>{[# @key Path: value]}</code>, one per line (a single comment may hold several lines). Paths use the model's form (<code>Client.FullName</code>, <code>Children[].DOB</code>). Settings made this way show a <em>from template</em> badge in the Variables tab; an edit there wins until you reset it. Use the <strong>@ Annotation</strong> toolbar button to insert one.</p>
+<table>
+<tr><th>Annotation</th><th>Example</th><th>Effect</th></tr>
+<tr><td>@label</td><td><code>{[# @label Client.FullName: Client's full legal name]}</code></td><td>Question text</td></tr>
+<tr><td>@help</td><td><code>{[# @help IsMarried: Legally married at signing]}</code></td><td>Hint under the question</td></tr>
+<tr><td>@options</td><td><code>{[# @options FeeType: Hourly | Flat | Contingency]}</code></td><td>Pick-list; a text variable becomes a selection</td></tr>
+<tr><td>@default</td><td><code>{[# @default Firm.State: California]}</code></td><td>Pre-filled answer (coerced to the type: <code>yes</code>, <code>1,500</code>, <code>a | b</code>)</td></tr>
+<tr><td>@required / @optional</td><td><code>{[# @required Children[].DOB]}</code> · <code>{[# @optional Suffix]}</code></td><td>Required flag (<code>@required X: false</code> also works)</td></tr>
+<tr><td>@type</td><td><code>{[# @type Retainer: currency]}</code></td><td>text, longtext, number, currency, date, boolean, selection, multiselect, email, phone, list, object, computed</td></tr>
+<tr><td>@min / @max</td><td><code>{[# @min Retainer: 0]}</code> · <code>{[# @max LeaseStart: 2030-12-31]}</code></td><td>Inclusive bounds for numbers, currency and dates (ISO date)</td></tr>
+<tr><td>@minLength / @maxLength</td><td><code>{[# @minLength Members: 2]}</code> · <code>{[# @maxLength Zip: 10]}</code></td><td>Characters for text; item count for lists and multi-selects</td></tr>
+<tr><td>@pattern</td><td><code>{[# @pattern Client.Phone: ^\\d{3}-\\d{3}-\\d{4}$]}</code></td><td>Regular expression the answer must match (add <code>^</code>/<code>$</code> for a full match)</td></tr>
+<tr><td>@validate</td><td><code>{[# @validate Members: sum(Members, "Percent") = 100 :: Percentages must total 100]}</code></td><td>Rule expression; <code>value</code> (or <code>this</code>) is the answer, all other answers are in scope; text after <code>::</code> is the error message</td></tr>
+<tr><td>@message</td><td><code>{[# @message Zip: Use a 5-digit ZIP code]}</code></td><td>Custom error text for every failing rule on the variable</td></tr>
+<tr><td>@formula</td><td><code>{[# @formula Children[].IsMinor: yearsBetween(DOB, today()) &lt; 18]}</code></td><td>Computed variable (never asked); item paths compute once per item</td></tr>
+</table>
+<p>Keys are case-insensitive. Mistakes (an unknown key, a bad regular expression, a non-integer length, an unknown type, an empty <code>@validate</code>) are listed under the editor as warnings with a line link — they never stop the document from generating.</p>
+
+<h2>Make a Word template</h2>
+<p>Instead of converting a document to text, you can keep your own Word file as the template: choose <strong>Import .docx → Keep as Word template</strong>. Every style, header, footer, numbering scheme, table and font is preserved, and only the <code>{[ ]}</code> tags are resolved. Editing happens in Word: change the tags there and click <strong>Replace Word file</strong> in the editor. Download the <strong>Example Word template</strong> from the Templates page to see one.</p>
+<ul>
+<li><strong>Fields</strong> go anywhere in running text, table cells, headers and footers: <code>Dear {[Client.FullName]},</code>. Filters and expressions work exactly as in text templates. Word may split a tag across formatting runs or add smart quotes — both are handled.</li>
+<li><strong>Paragraph-level blocks.</strong> Put <code>{[if …]}</code>, <code>{[else]}</code>, <code>{[end if]}</code>, <code>{[list …]}</code> and <code>{[end list]}</code> on a line (paragraph) of their own to include, skip or repeat whole paragraphs. The marker paragraph itself disappears from the output. Inline <code>{[if X]}…{[end if]}</code> inside a sentence keeps working; a paragraph that renders to nothing is removed.</li>
+<li><strong>Repeating table rows.</strong> Start the first cell of a row with <code>{[list Members]}</code> and end its last cell with <code>{[end list]}</code>: the row is repeated once per item with the item's fields (<code>{[FullName]}</code>, <code>{[Percent]}%</code>) filled in.</li>
+<li><strong>Comments and annotations</strong> (<code>{[# …]}</code>, <code>{[# @label …]}</code>) work the same way; keep each tag inside a single paragraph.</li>
+<li><strong>Preview.</strong> The editor's Preview tab shows a text preview of the tags; the generated document itself is your Word file with the tags filled, and the output page shows an approximation of it.</li>
+</ul>
+
 <h2>Records and packages</h2>
 <p>Answers are stored as <strong>records</strong> (one per client or matter) and can be reused across templates. A <strong>package</strong> is an ordered set of templates that share one questionnaire; each template can carry an "include if" expression such as <code>Client.IsMarried</code>.</p>
 

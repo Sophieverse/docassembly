@@ -4,10 +4,10 @@
  */
 import * as store from './store.js';
 import { el, clear, toast, download, copyText, safeFilename } from './components.js';
-import { renderTemplate, docxBlob, printBlocks } from './docgen.js';
+import { renderTemplate, renderWordTemplate, isWordTemplate, docxBlob, printBlocks } from './docgen.js';
 import { resolveTargets, includeIfHolds } from './ui-interview.js';
 
-export function renderOutput(main, ctx) {
+export async function renderOutput(main, ctx) {
   clear(main);
   const { targets, name, error, pkg, template } = resolveTargets(ctx.params);
   if (error || !targets.length) { main.appendChild(el('div.card', error || 'Nothing to generate.', ' ', el('a', { href: '#/templates' }, 'Back'))); return; }
@@ -16,11 +16,16 @@ export function renderOutput(main, ctx) {
   const backHash = (pkg ? `#/interview/pkg/${pkg.id}` : `#/interview/${template.id}`) + (record ? `?record=${record.id}` : '');
 
   const docs = [];
+  const busy = el('div.card.muted', 'Generating…');
+  if (targets.some(({ template: t }) => isWordTemplate(t))) main.appendChild(busy);
   for (const { template: t, includeIf } of targets) {
     if (!includeIfHolds(includeIf, data)) { docs.push({ template: t, skipped: true }); continue; }
-    const r = renderTemplate(t, data);
-    docs.push({ template: t, ...r, filename: safeFilename(record ? `${t.name} - ${record.name}` : t.name, 'docx') });
+    // Word templates are filled in place (all Word formatting kept); text templates are rendered and rebuilt.
+    const r = isWordTemplate(t) ? await renderWordTemplate(t, data) : renderTemplate(t, data);
+    docs.push({ template: t, ...r, word: isWordTemplate(t), filename: safeFilename(record ? `${t.name} - ${record.name}` : t.name, 'docx') });
   }
+  busy.remove();
+  if (!main.isConnected) return; // navigated away while filling
   const included = docs.filter((d) => !d.skipped && !d.errors.length);
   const allWarnings = included.flatMap((d) => d.warnings.map((w) => (targets.length > 1 ? `${d.template.name}: ${w}` : w)));
 
@@ -35,6 +40,7 @@ export function renderOutput(main, ctx) {
       d.skipped ? el('span.badge.badge-warn', 'not included') : el('button.btn.btn-sm', { type: 'button', onClick: () => dl(d) }, 'Download .docx')));
     if (d.skipped) continue;
     if (d.errors.length) { body.appendChild(el('div.errors', 'This template has syntax errors and could not be generated: ', d.errors[0].message, ' ', el('a', { href: `#/templates/${d.template.id}` }, 'Open editor'))); continue; }
+    if (d.word) body.appendChild(el('div.muted.small.mb.no-print', el('span.badge.badge-accent', 'Word template'), ' Filled in place from ', el('code', d.template.docxName || 'the original .docx'), ' — the preview below approximates Word\'s styling; the download keeps every style, header and footer.'));
     body.appendChild(el('div.doc-host.mb', { html: d.html || '<div class="doc"><p>(empty document)</p></div>' }));
   }
 
@@ -57,6 +63,7 @@ export function renderOutput(main, ctx) {
 
   async function dl(d) {
     try {
+      if (d.word && d.bytes) { download(d.filename, new Blob([d.bytes], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' })); return; }
       download(d.filename, await docxBlob(d.blocks, d.template.name));
     } catch (e) {
       console.error(e);

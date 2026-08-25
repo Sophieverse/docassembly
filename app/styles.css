@@ -384,3 +384,36 @@ kbd { font-family: var(--font-mono); font-size: .8em; border: 1px solid var(--bo
   .doc { box-shadow: none; border: 0; padding: 0; max-width: none; }
   .doc .pagebreak { page-break-after: always; border: 0; height: 0; margin: 0; font-size: 0; }
 }
+
+/* ---------- validation, annotations, rules (engine additions) ---------- */
+.errors a { display: block; color: inherit; text-decoration: none; }
+.errors a:hover, .errors a:focus { text-decoration: underline; }
+.list-field > .error { color: var(--danger); font-size: .86rem; margin: -.25rem 0 .5rem; }
+.field.invalid > .list-field > .flex > label { color: var(--danger); }
+.list-item-simple { display: flex; align-items: center; gap: .35rem; padding: .3rem .5rem; }
+.list-item-simple input { flex: 1; }
+.list-item-simple .idx { min-width: 1.4rem; text-align: right; }
+.datalist-wrap { display: contents; }
+.annotation-warnings { margin-top: .5rem; max-height: 110px; overflow: auto; }
+.annotation-warnings div { cursor: pointer; }
+.annotation-warnings div:hover { text-decoration: underline; }
+.badge-tpl { background: var(--accent-soft); color: var(--accent); border-color: transparent; font-weight: 500; white-space: nowrap; }
+[data-theme="dark"] .badge-tpl { color: #ffffff; }
+.ml { margin-left: .35rem; }
+table.vars .cell { display: flex; align-items: center; gap: .3rem; }
+table.vars .cell > input[type=text], table.vars .cell > select { flex: 1; min-width: 0; }
+.reset-field { padding: 0 .3rem; line-height: 1; }
+.var-extra label .badge { vertical-align: middle; }
+details.rules { border: 1px solid var(--border); border-radius: var(--radius); padding: .25rem .5rem; background: var(--bg); }
+details.rules summary { cursor: pointer; font-size: .82rem; font-weight: 600; color: var(--fg-muted); }
+details.rules[open] summary { margin-bottom: .35rem; }
+.var-rules { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
+.annotation-warnings .ann-error { color: var(--danger); }
+.annotation-warnings .badge { margin-right: .2rem; }
+/* ---------- Word-template mode ---------- */
+.import-choice { display: grid; gap: .6rem; }
+.import-mode { display: block; text-align: left; white-space: normal; padding: .7rem .9rem; height: auto; line-height: 1.35; }
+.import-mode strong { display: block; margin-bottom: .2rem; }
+.word-banner { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; margin-bottom: .5rem; font-size: .88rem; }
+.banner-info { border: 1px solid var(--accent-soft); background: var(--accent-soft); color: var(--fg); border-radius: var(--radius); padding: .5rem .75rem; }
+.editor-textarea[readonly] { background: var(--bg-sunken); }

@@ -5,9 +5,9 @@
 import * as store from './store.js';
 import { el, clear, toast, prompt, modal, debounce, confirm } from './components.js';
 import { navigate } from './router.js';
-import { questionnaire, validate } from './engine-api.js';
+import { questionnaire, validate, relevantVariables, getConcretePath } from './engine-api.js';
 import { compileCached, renderTemplate, withDerived, getPath, setPath, isAnswered, pruneEmpty } from './docgen.js';
-import { renderQuestion, progress, itemFieldName, groupQuestions, genericPath, ownerOf, fillListFields, patchGroup } from './ui-fields.js';
+import { renderQuestion, progress, itemFieldName, groupQuestions, genericPath, ownerOf, fillListFields, patchGroup, applyFieldErrors } from './ui-fields.js';
 
 /** Resolve what to interview: [{template, includeIf}] */
 export function resolveTargets(params) {
@@ -85,7 +85,8 @@ export function renderInterview(main, ctx) {
   let questions = [];
   const elems = new Map(); // path → element
   const sig = new Map();   // path → itemFields signature
-  let errors = new Map();
+  let errors = new Map();   // concrete path ("Members[1].Percent") → message
+  let generateTried = false; // after a blocked Generate, live validation also reports missing required answers
 
   const hashBase = pkg ? `/interview/pkg/${pkg.id}` : `/interview/${template.id}`;
   const outputBase = pkg ? `/output/pkg/${pkg.id}` : `/output/${template.id}`;
@@ -166,6 +167,7 @@ export function renderInterview(main, ctx) {
     progressFill.style.width = pct + '%';
     progressBar.setAttribute('aria-valuenow', String(pct));
     progressBar.setAttribute('aria-valuetext', `${p.done} of ${p.total} answered`);
+    applyFieldErrors(qHost, errors);
     updatePreview();
   }
   function make(q) {
@@ -174,10 +176,17 @@ export function renderInterview(main, ctx) {
   }
   function onAnswer() {
     dirty = true;
-    if (errors.size) { errors = new Map(); errSummary.classList.add('hidden'); qHost.querySelectorAll('.invalid').forEach((n) => { n.classList.remove('invalid'); const e = n.querySelector(':scope > .error'); if (e) e.remove(); }); }
     scheduleRefresh();
+    scheduleValidate();
   }
   const scheduleRefresh = debounce(refresh, 120);
+  // Live validation: rules (min/max/pattern/validate…) as the user types; missing required answers only once Generate was tried.
+  const scheduleValidate = debounce(() => {
+    collectErrors({ requiredToo: generateTried });
+    applyFieldErrors(qHost, errors);
+    if (!errors.size) errSummary.classList.add('hidden');
+    else if (!errSummary.classList.contains('hidden')) drawSummary();
+  }, 350);
   const pendingGroups = new Set();
   qHost.addEventListener('focusout', () => { if (pendingGroups.size) { pendingGroups.clear(); setTimeout(refresh, 50); } });
 
@@ -235,45 +244,78 @@ export function renderInterview(main, ctx) {
   }
 
   /* ---------- validation + generate ---------- */
-  function collectErrors() {
+  /** Concrete item paths on screen ("Members[0]", "Members[1]") are covered by the generic ones relevantVariables() yields. */
+  function relevantFor(t, full) {
+    try {
+      const c = compileCached(t.text || '');
+      if (!c.ast) return null;
+      return relevantVariables(c.ast, full).relevant;
+    } catch (e) { return null; }
+  }
+  /**
+   * errors ← Map<concrete path, message>. Required answers are reported by the UI walk (top-level
+   * and object fields) and by the engine (list items); only questions currently asked count.
+   * opts.requiredToo=false skips "is required" so live validation does not nag while typing.
+   */
+  function collectErrors({ requiredToo = true } = {}) {
     errors = new Map();
-    const walk = (qs, scope, prefix) => {
-      for (const q of qs) {
-        const full = prefix ? prefix + '.' + q.path : q.path;
-        if (q.type === 'object') { walk((q.itemFields || []).map((f) => ({ ...f, path: itemFieldName(f, q.path) })), getPath(scope, q.path) || {}, full); continue; }
-        if (q.required && !isAnswered(getPath(scope, q.path))) errors.set(full, 'This answer is required.');
-      }
-    };
-    walk(questions, data, '');
-    for (const { template: t } of targets) {
-      try {
-        for (const e of validate(t.model, withDerived(t, data)) || []) {
-          // Only report validation problems for variables currently asked.
-          if (ownerOf(e.path, questions) && !errors.has(genericPath(e.path))) errors.set(genericPath(e.path), e.message);
+    if (requiredToo) {
+      const walk = (qs, scope, prefix) => {
+        for (const q of qs) {
+          const full = prefix ? prefix + '.' + q.path : q.path;
+          if (q.type === 'object') { walk((q.itemFields || []).map((f) => ({ ...f, path: itemFieldName(f, q.path) })), getPath(scope, q.path) || {}, full); continue; }
+          if (q.required && !isAnswered(getPath(scope, q.path))) errors.set(full, 'This answer is required.');
         }
-      } catch (e) { /* ignore */ }
+      };
+      walk(questions, data, '');
+    }
+    for (const { template: t, includeIf } of targets) {
+      if (targets.length > 1 && !includeIfHolds(includeIf, data)) continue;
+      if (!t.model) continue;
+      try {
+        const full = withDerived(t, data);
+        const relevant = relevantFor(t, full);
+        for (const e of validate(t.model, full, relevant ? { relevant } : {}) || []) {
+          if (!e || !e.path) continue;
+          // Only report validation problems for variables currently asked.
+          if (!ownerOf(e.path, questions)) continue;
+          if (errors.has(e.path)) continue;
+          if (!requiredToo && !isAnswered(getConcretePath(full, e.path))) continue; // a blank answer: required-only, skipped while typing
+          errors.set(e.path, e.message);
+        }
+      } catch (e) { console.warn('validate failed', e); }
     }
     return errors;
   }
+  /** Focus the control for a concrete error path (falls back to the owning question). */
+  function focusError(path) {
+    const q = ownerOf(path, questions);
+    const n = qHost.querySelector(`.q[data-full="${CSS.escape(path)}"]`) || elems.get(q ? q.path : path);
+    if (!n) return;
+    n.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const i = n.querySelector('input:not([disabled]), select, textarea, .segmented button');
+    if (i) i.focus();
+  }
+  function drawSummary() {
+    clear(errSummary); errSummary.classList.remove('hidden');
+    errSummary.appendChild(el('div', `${errors.size} answer${errors.size === 1 ? ' needs' : 's need'} attention before generating:`));
+    for (const [path, msg] of errors) {
+      const q = ownerOf(path, questions);
+      errSummary.appendChild(el('a', { href: '#', onClick: (e) => { e.preventDefault(); focusError(path); } }, `• ${labelOf(path, q)}: ${msg}`));
+    }
+  }
   async function generate() {
-    collectErrors();
+    generateTried = true;
+    scheduleValidate.cancel();
+    collectErrors({ requiredToo: true });
     if (errors.size) {
-      clear(errSummary); errSummary.classList.remove('hidden');
-      errSummary.appendChild(el('div', `${errors.size} answer${errors.size === 1 ? ' needs' : 's need'} attention before generating:`));
-      for (const [path, msg] of errors) {
-        const q = ownerOf(path, questions);
-        errSummary.appendChild(el('div', { onClick: () => { const n = elems.get(q ? q.path : path); if (n) { n.scrollIntoView({ behavior: 'smooth', block: 'center' }); const i = n.querySelector('.invalid input, .invalid select, .invalid textarea, .invalid button, input, select, textarea, button'); if (i) i.focus(); } } }, `• ${labelOf(path, q)}: ${msg}`));
-      }
-      // re-render affected nodes with error state
-      for (const [path] of errors) {
-        const top = ownerOf(path, questions);
-        if (!top) continue;
-        const old = elems.get(top.path); if (!old) continue;
-        const n = make(top); old.replaceWith(n); elems.set(top.path, n);
-      }
+      drawSummary();
+      applyFieldErrors(qHost, errors);
       errSummary.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      errSummary.focus();
       return;
     }
+    errSummary.classList.add('hidden');
     if (!(await saveToRecord(true))) return;
     navigate(`${outputBase}?record=${record.id}`);
   }
@@ -285,7 +327,9 @@ export function renderInterview(main, ctx) {
     if (q.path === g) return q.label || q.path;
     const rel = g.startsWith(q.path + '[].') ? g.slice(q.path.length + 3) : g.startsWith(q.path + '.') ? g.slice(q.path.length + 1) : g;
     const f = (q.itemFields || []).find((x) => itemFieldName(x, q.path) === rel);
-    return `${q.label || q.path} — ${f ? f.label || rel : rel}`;
+    const idx = /\[(\d+)\]/.exec(String(path).slice(q.path.length));
+    const item = idx ? ` ${Number(idx[1]) + 1}` : '';
+    return `${q.label || q.path}${item} — ${f ? f.label || rel : rel}`;
   }
 
   window.onbeforeunload = () => (dirty ? true : undefined);

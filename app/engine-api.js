@@ -6,9 +6,11 @@
 export {
   compile, assemble, parse, render, analyze, relevantVariables, questionnaire, dependencyMap,
   createModel, mergeModel, coerce, validate, computeDerived, humanize, functions,
+  getPath as getConcretePath, ANNOTATION_KEYS,
 } from '../engine/index.js';
 
 export { textToBlocks } from '../engine/docx/blocks.js';
 export { buildDocx } from '../engine/docx/docxwrite.js';
 export { readDocx } from '../engine/docx/docxread.js';
 export { blocksToHtml } from '../engine/docx/html.js';
+export { fillDocx, extractTemplateText } from '../engine/docx/fill.js';

@@ -2,7 +2,7 @@
  * @module docgen
  * Shared helpers that turn a template + answers into HTML / DOCX / text, plus model helpers.
  */
-import { compile, render, computeDerived, textToBlocks, blocksToHtml, buildDocx, humanize, createModel } from './engine-api.js';
+import { compile, render, computeDerived, textToBlocks, blocksToHtml, buildDocx, humanize, createModel, fillDocx, readDocx } from './engine-api.js';
 
 /** Fonts the DOCX writer is asked for; anything else falls back to the first entry. */
 export const FONTS = ['Times New Roman', 'Georgia', 'Cambria', 'Garamond', 'Book Antiqua', 'Arial', 'Calibri', 'Helvetica', 'Verdana'];
@@ -67,6 +67,44 @@ export function renderTemplate(template, data, opts = {}) {
     html = `<div class="doc"><div class="doc-plain">${escapeHtml(out.text || '')}</div></div>`;
   }
   return { text: out.text || '', warnings: out.warnings || [], html, blocks, errors: [], trace: out.trace || null };
+}
+
+/* ---------- Word-template mode (original .docx kept, tags filled in place) ---------- */
+export function bytesToBase64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+export function base64ToBytes(b64) {
+  const s = atob(b64);
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+/** A template whose original Word file is kept (`docxOrigin` = base64 bytes) and filled in place. */
+export const isWordTemplate = (t) => !!(t && typeof t.docxOrigin === 'string' && t.docxOrigin.length > 0);
+
+/**
+ * Fill a Word template: original .docx bytes + answers → { bytes, text, warnings, html, blocks, errors }.
+ * Never throws (errors are returned). The HTML preview is a re-read of the filled file (styles approximated).
+ */
+export async function renderWordTemplate(template, data, opts = {}) {
+  const c = compileCached(template.text || '');
+  if (c.errors && c.errors.length) return { text: '', warnings: [], html: '', blocks: [], bytes: null, errors: c.errors, trace: null };
+  let r;
+  try {
+    r = await fillDocx(base64ToBytes(template.docxOrigin), withDerived(template, data), { model: template.model || null, ...opts });
+  } catch (e) {
+    return { text: '', warnings: [String(e.message || e)], html: '', blocks: [], bytes: null, errors: [{ message: String(e.message || e) }], trace: null };
+  }
+  let blocks = [], html = '';
+  try {
+    blocks = (await readDocx(r.bytes)).blocks;
+    html = blocksToHtml(blocks, { fragment: true, ...docOpts() });
+  } catch (e) {
+    html = `<div class="doc"><div class="doc-plain">${escapeHtml(r.text || '')}</div></div>`;
+  }
+  return { text: r.text || '', warnings: r.warnings || [], html, blocks, bytes: r.bytes, errors: [], trace: null };
 }
 
 /** Document options (font/size/margins) from settings. */
