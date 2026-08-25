@@ -30,7 +30,7 @@ import { unescapeXml, readDocx } from './docxread.js';
 import { escapeXml } from './docxwrite.js';
 import { classifyTag } from '../parser.js';
 import { parseExpr, evalExpr, createScope, createTrace, truthy, pathOf, listIdentity, stripPuncFilter } from '../expr.js';
-import { functions as builtins } from '../functions.js';
+import { functions as builtins, puncFor } from '../functions.js';
 import { formatValue, itemVars } from '../evaluate.js';
 import { normalizeSmartQuotes } from '../lexer.js';
 
@@ -162,7 +162,8 @@ function parseSeq(items) {
         break;
       }
       case 'list': {
-        const node = { type: 'list', expr: it.expr, src: it.src, itemName: it.itemName, body: [] };
+        // `inline`: the marker is a tag atom inside a paragraph (finishPara attaches `tag` but no `item`).
+        const node = { type: 'list', expr: it.expr, src: it.src, itemName: it.itemName, body: [], tag: it.tag, inline: !!it.tag && !it.item };
         top().current.push(node);
         stack.push({ kind: 'list', node, current: node.body });
         break;
@@ -668,7 +669,19 @@ class Part {
           const { value } = this.evalIn(listExpr, scope, node.src);
           const items = Array.isArray(value) ? value : value == null || value === '' ? [] : [value];
           const prefix = listPrefix(listExpr, node.src, scope);
-          items.forEach((item, i) => this.evalSeq(node.body, createScope(itemVars(item, i, items.length, node.itemName, punc), scope, prefix), emit));
+          // Knackly auto-punctuates inline lists: with `|punc:"1, 2, and 3"` and no explicit {[_punc]} in the
+          // body, the separator follows each item as a synthetic run formatted like the item's last run
+          // (or the list tag). Paragraph/row-level lists repeat whole blocks and get no separator.
+          const autoPunc = !!punc && node.inline && !bodyHasPunc(node.body);
+          items.forEach((item, i) => {
+            const sc = createScope(itemVars(item, i, items.length, node.itemName, punc), scope, prefix);
+            if (!autoPunc) { this.evalSeq(node.body, sc, emit); return; }
+            let last = null;
+            this.evalSeq(node.body, sc, (a, s) => { if (a && (a.kind === 'run' || a.kind === 'tag')) last = a; emit(a, s); });
+            const sep = puncFor(punc, i, items.length);
+            const like = last || node.tag;
+            if (sep && like) emit({ kind: 'run', ancestry: like.ancestry, openTag: like.openTag, rPr: like.rPr, pieces: textPieces(sep) }, sc);
+          });
           break;
         }
         default: break;
@@ -699,6 +712,16 @@ class Part {
     walk(this.root);
     return lines.join('\n');
   }
+}
+
+/** Does an inline list body reference {[_punc]} anywhere (including nested if/list bodies)? */
+function bodyHasPunc(body) {
+  for (const n of body) {
+    if (n.type === 'content') { if (n.item && n.item.kind === 'tag' && /\b_punc\b/.test(n.item.inner)) return true; }
+    else if (n.type === 'if') { if (n.branches.some((b) => bodyHasPunc(b.body)) || (n.elseBody && bodyHasPunc(n.elseBody))) return true; }
+    else if (n.type === 'list' && bodyHasPunc(n.body)) return true;
+  }
+  return false;
 }
 
 function snippet(text) {
