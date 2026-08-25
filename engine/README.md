@@ -89,7 +89,7 @@ next paragraph.
 
 The same applies inside a sentence: keep the leading space inside the tag (`due.{[if X]} Interest accrues.{[end if]} Next`) rather than before it, or a double space remains when the condition is false. Guard lists that may be empty (`{[if count(Children) > 0]}`), or an empty list prints "children: .".
 
-Truthiness: empty text, `null`, `0`, `false`, and empty lists are false; everything else is true. A variable used bare in a condition (`{[if IsMarried]}`, `{[if not HasKids]}`) is inferred to be a Yes/No question — **even when the same variable is also printed as text** (`{[if Court]} in the {[Court]}{[end if]}` makes `Court` a Yes/No question). Until the analyzer is smarter, override the type in the Variables panel / model, or test optional text with `{[if not isEmpty(Court)]}`, which keeps it a text question.
+Truthiness: empty text, `null`, `0`, `false`, and empty lists are false; everything else is true. A variable used *only* bare in conditions (`{[if IsMarried]}`, `{[if not HasKids]}`) is inferred to be a Yes/No question. A variable that is also printed, filtered, or compared (`{[if Court]} in the {[Court]}{[end if]}`) is read as a has-value check and stays a text question — see How the questionnaire is inferred.
 
 Per-item list tests work in conditions too: `{[if Children|any: yearsBetween(DOB, today()) < 18]}…{[end if]}` needs no stored "IsMinor" answer.
 
@@ -205,29 +205,190 @@ Call these with dot syntax on any value: `.toUpperCase() .toLowerCase() .trim() 
 ### Custom functions
 `registerFunction("shout", s => s.toUpperCase() + "!")` makes `{[Name|shout]}` available everywhere.
 
+## Template annotations
+
+Questionnaire metadata can live in the template itself, so the template stays the single source of truth. Put `@key Path: value` lines inside a comment, one per line; a single comment may hold several, and plain lines in the same comment are ignored. Keys are case-insensitive. Paths use the model's form (`Client.FullName`, `Children[].DOB`).
+
+```
+{[# @label Client.FullName: Client's full legal name
+@help IsMarried: Legally married at signing
+@options FeeType: Hourly | Flat | Contingency
+@default Firm.State: California
+@required Children[].DOB
+@type Retainer: currency
+@min Retainer: 0
+@validate Members: sum(Members, "Percent") = 100 :: Member percentages must total 100
+@formula Children[].IsMinor: yearsBetween(DOB, today()) < 18]}
+```
+
+| Key | Value | Effect on the variable |
+| --- | --- | --- |
+| `@label` | text | question label |
+| `@help` | text | help text under the question |
+| `@options` | `A \| B \| C` | choice list; a text variable becomes a `selection` (unless `@type` says otherwise) |
+| `@default` | text | default answer, coerced to the variable's type (`yes` → true, `1,500` → 1500; `a \| b` for multiselect) |
+| `@required` / `@optional` | none, or `false` / `no` / `0` / `off` | required flag |
+| `@type` | `text` `longtext` `number` `currency` `date` `boolean` `selection` `multiselect` `email` `phone` `list` `object` `computed` | type |
+| `@min` / `@max` | number, or ISO date (`2020-01-01`) | bounds (see Validation rules) |
+| `@minLength` / `@maxLength` | whole number | character count for text, item count for lists |
+| `@pattern` | regular-expression source | pattern the text must match |
+| `@validate` | `expression [:: message]` | rule expression; the part after `::` becomes the error message |
+| `@message` | text | custom error text for every failing rule on that variable |
+| `@formula` | expression | makes the variable `computed`; creates it if the template never prints it (`Children[].IsMinor`) |
+
+With the comment above, `createModel(compile(text).analysis)` yields `FeeType` as `{type: "selection", options: ["Hourly","Flat","Contingency"]}`, `Firm.State` with `default: "California"`, `Retainer` as `currency` with `min: 0`, `Members` with `validate` and `message`, and a new computed variable `Children[].IsMinor` (label "Children — Is minor?"). Each value that came from the template is also recorded in `def.fromTemplate` (e.g. `{type: "currency", min: 0}` on `Retainer`) and copied onto the question as `question.fromTemplate`, so a UI can show "set in template".
+
+Mistakes never break compilation: `compile()` still returns `errors: []`, and the problems land in `analysis.annotationErrors` as `[{message, line, col}]`. Reported: an unknown key (`@bogus X: 1` → "Unknown annotation @bogus (known: @label, @help, …)"), an invalid regex (`@pattern Zip: (` → "@pattern Zip: invalid regular expression: …"), a non-integer length (`@maxLength Zip: two` → '@maxLength Zip: expected a whole number, got "two"'), an unknown `@type`, and an empty `@validate`. An annotation for a variable the template never uses is ignored, except `@formula`/`@type computed`, which create the variable.
+
+Precedence per field is **user edit in the Variables panel > annotation > inference**. `mergeModel(existing, analysis)` re-applies annotations after every template change unless the user edited that field in the UI (an explicit `custom: {label: true}` flag, or a stored value that differs from both what inference produces and what the last annotation set). Removing an annotation from the template reverts the field to inference: delete the `@help IsMarried` line and the help goes back to `""`. A variable created by `@formula` whose annotation disappears is orphaned like any other unused variable.
+
+## Validation rules
+
+Rules live on the variable definition (`model.variables[path]`), set either in the Variables panel or with the annotations above.
+
+| Field | Applies to | Meaning |
+| --- | --- | --- |
+| `min`, `max` | number, currency, date | Inclusive bounds. Dates take an ISO string (`"2020-01-01"`); the answer may be in any accepted date format. A bound of the wrong kind (a number on a date) is ignored. |
+| `minLength`, `maxLength` | text-like; lists and multiselect | Characters for text, items for lists. |
+| `pattern` | text, phone, email… | Regular-expression source, tested with `new RegExp(pattern).test(value)` — add `^`/`$` for a full match. |
+| `validate` | any | An expression in the template language. Scope: the whole data object plus `value` / `this` for the current answer. For a list item field the item's fields come first (shadowing top-level data) along with `_index`, `_first`, `_last`, `_count`; for a list variable `value` is the array. Falsy result (or empty text / empty list) = invalid. |
+| `message` | any | Custom error text. Replaces the default text of **every** failing rule on that variable (not the "is required" / type messages). |
+
+`validate(model, data, { relevant?, requiredOnly? })` returns `[{path, message}]`. Per value the order is: blank → only the required check; then the type check (a malformed number/date/email/selection stops there, so rule errors never pile on top of a type error); then the rules. With `requiredOnly: true` only missing required answers are reported.
+
+```
+{[# @min Hours: 1
+@max Hours: 10
+@min StartDate: 2020-01-01
+@minLength Zip: 5
+@pattern Client.Phone: ^\d{3}-\d{3}-\d{4}$
+@validate Retainer: this >= Hours * 100
+@validate Members: sum(Members, "Percent") = 100 :: Member percentages must total 100
+@min Members[].Percent: 0
+@max Members[].Percent: 100]}
+```
+
+With `{Hours: 12, StartDate: "3/5/2019", Zip: "9410", Client: {Phone: "555-1234"}, Retainer: 500, Members: [{Percent: 60}, {Percent: 150}, {Percent: -10}]}`, `validate(model, data)` reports (messages are prefixed with the variable's label):
+
+```
+Hours            Hours must be at most 10
+StartDate        Start date must be on or after 2020-01-01
+Zip              Zip must have at least 5 characters
+Client.Phone     Client — Phone must match pattern ^\d{3}-\d{3}-\d{4}$
+Retainer         Retainer is not valid (rule: this >= Hours * 100)
+Members          Member percentages must total 100
+Members[1].Percent   Members — Percent must be at most 100
+Members[2].Percent   Members — Percent must be at least 0
+```
+
+Other messages you may see: `Hours must be a number` (type check; `Hours: "abc"`), `Hours is required` (blank), `Hours: bad validation rule: …` (the expression does not parse), `Zip: invalid pattern /(/`.
+
+Lists:
+
+- A rule on the **list variable** (`Members`) reports on path `Members`. Because `message` replaces every failing rule's text, a list with both `@validate … :: msg` and `@maxLength` reports `msg` twice when both fail — give such a list one rule, or use the default texts.
+- A rule on an **item field** (`Members[].Percent`) is checked per item and reports concrete paths (`Members[1].Percent`). Nested lists work the same way (`Trusts[0].Beneficiaries[2].Share`).
+- `relevant` may mix generic and concrete paths: `relevant: ["Hours", "Members[1].Percent"]` checks `Hours` and only item 1's percent (`"Members[].Percent"` would check every item). Omit `relevant` to check everything. `relevantVariables().relevant` gives generic paths and `.unanswered` concrete ones — either works.
+
+Rules can reference computed values, so run `computeDerived` first and validate the result.
+
+## Computed variables
+
+A variable of type `computed` with a `formula` is evaluated from the other answers instead of being asked. Define it in the Variables panel, with `@formula` in the template, or directly on the model:
+
+```js
+model.variables.MinorCount = { path: 'MinorCount', type: 'computed', formula: 'count(Children|filter: IsMinor)' };
+model.variables['Children[].IsMinor'] = { path: 'Children[].IsMinor', type: 'computed', isListItemField: true, formula: 'yearsBetween(DOB, today()) < 18' };
+```
+
+`computeDerived(model, data)` returns `{ data, errors }` — a copy of the data with every formula filled in, never a throw. Top-level formulas are stored on the data (`data.MinorCount`); **per-item** formulas (path containing `[]`) run once per list item with the item's fields in scope first (shadowing top-level data) plus `_index`, `_index0`, `_first`, `_last`, `_count`, `_item`/`this`, and the result is stored on each item. Given
+
+```
+{[# @formula Children[].IsMinor: yearsBetween(DOB, today()) < 18
+@formula MinorCount: count(Children|filter: IsMinor)
+@formula Children[].Label: Name + " (#" + _index + " of " + _count + ")"]}
+```
+
+and `{Children: [{Name: "Kim", DOB: "2012-03-14"}, {Name: "Lee", DOB: "1999-11-02"}]}`, the derived data is
+
+```
+{Children: [{Name: "Kim", DOB: "2012-03-14", IsMinor: true,  Label: "Kim (#1 of 2)"},
+            {Name: "Lee", DOB: "1999-11-02", IsMinor: false, Label: "Lee (#2 of 2)"}],
+ MinorCount: 1}
+```
+
+- Formulas run in dependency order across both kinds: `MinorCount` reads `Children`, so it runs after `Children[].IsMinor`; an item formula may use another item computed field of the same list by bare name, or any top-level computed.
+- Nested lists (`Trusts[].Beneficiaries[].Amount` with formula `Corpus * Share / 100`) see the inner item first, then the outer item (`Corpus`), then top-level data.
+- A cycle yields `{path: "A", message: "Circular formula: A → B → A"}`; a formula that fails to parse yields `Bad formula: …`; a runtime failure yields `Formula error: …` on the concrete path.
+- A missing or non-array list is skipped silently. Orphaned computed variables are skipped. Computed variables never appear in the questionnaire and are never validated.
+- When you build the definition by hand, set `isListItemField: true` on a per-item path (`createModel`/`@formula` do this for you); without it the path is treated as top-level. `listPath` is optional.
+
+## Questionnaire generation and relevance
+
+`questionnaire(ast, data, model?)` returns the questions to ask **right now**, in template order, one per variable:
+
+```js
+[{ path, label, type, required, answered, options?, suggestions?, itemType?, listPath?, help?,
+   min?, max?, minLength?, maxLength?, pattern?, default?, fromTemplate? }]
+```
+
+- `type` and `label` come from the model when given, else from inference (`humanize(path, type)`). Without a model every question is `required: true`; with a model, `required` follows the definition (booleans, lists and computed default to not required).
+- `options` is present only for `selection` / `multiselect`. For `text` / `longtext` the literals the template compares against surface as `suggestions` instead (render as a `<datalist>`).
+- `itemType: "text"` marks a list of plain values (`{[Names|join]}`, `{[list Tags]}{[_item]}{[end list]}`, `count(Pets)`): render it as a repeatable text input producing `string[]`. Lists whose body uses item fields have no `itemType`, and their fields appear as their own questions (`Kids[].Name` with `listPath: "Kids"`) once the list has items.
+- `answered` is false while any relevant concrete value is blank — for an item field, while any item is missing it.
+- `object` and `computed` variables and orphaned definitions are never questions.
+
+Relevance: a variable is asked when it appears in a field whose enclosing conditions are currently true, in a condition that has been reached, or in a list body for a list that has items. If a condition depends on unanswered variables, the questions inside it wait until the condition can be evaluated. Order follows first appearance in the template. For
+
+```
+{[Client.Name]}{[if Client.IsMarried]}{[Spouse.Name]}{[end if]}{[if State = "CA"]}{[CAForm]}{[end if]}
+{[list Names]}{[_item]}{[end list]}{[list Kids]}{[Name]}{[end list]}
+```
+
+with `{Client: {Name: "A"}, Kids: [{}, {Name: "B"}]}`, `relevantVariables(ast, data)` gives
+
+```
+relevant:   Client.Name, Client.IsMarried, State, Names, Kids, Kids[].Name
+unanswered: Client.IsMarried, State, Names, Kids[0].Name
+blockedBy:  Spouse.Name ← Client.IsMarried        CAForm ← State = "CA"
+```
+
+`Spouse.Name` and `CAForm` are not asked yet; once `Client.IsMarried` is Yes and `State` is `CA`, both join the questionnaire in their template positions. `blockedBy` lists, for each waiting variable, the condition source that must be decided first; `values` holds every referenced concrete value. `dependencyMap(ast)` gives the designer's view — for each variable, the `if`/`list` blocks it gates and which variables they contain.
+
 ## How the questionnaire is inferred
+
+Every variable gets a type, and choice types get options, from how the template uses it. Stronger evidence wins (a filter beats a name hint), and the first-seen use does not matter.
 
 | Template usage | Inferred type |
 | --- | --- |
-| `{[if X]}`, `{[if not X]}`, names like `IsMarried`, `HasChildren` | boolean (Yes/No) |
-| `|currency`, `|dollars`, names ending in Amount / Fee / Price / Cost / Rent / Total … | currency |
-| `|number`, `|ordinal`, `|words`, `X > 5`, names ending in Count / Number / Age / Qty … | number |
-| `|format:"…"`, date functions, `X < "2026-01-01"`, names ending in Date / DOB / Deadline | date |
-| `{[list X]}`, `count(X)`, `X|join` | list |
+| `{[if X]}`, `{[if not X]}` as the *only* use, or `X = true`, or `\|format:"yes":"no"` | boolean (Yes/No) |
+| names starting with Is / Has / Can / Should / Will / Does / Did / Wants / Needs / Include(s) (`IsMarried`, `HasChildren`) | boolean, whatever else the template does with it |
+| `\|currency`, `\|dollars`, `\|dollarsWords`, `\|cents` …, names ending in Amount / Fee / Price / Cost / Salary / Rent / Value / Total / Balance / Payment / Deposit / Retainer / Wage / Income / Principal / Debt / Damages … | currency |
+| `\|number`, `\|ordinal`, `\|words`, `\|round`, `\|roman`, `\|pluralize` …, `X > 5`, names ending in Count / Number / Num / Qty / Percent / Age / Years / Months / Days / Term / Shares / Units / Hours | number |
+| `\|format:"long"` (any non-numeric format), date functions (`addDays`, `age`, `yearsBetween`, `year` …), `X < "2026-01-01"`, names ending in Date / DOB / Birthday / Deadline / Expires / Expiration | date |
+| `{[list X]}`, `count(X)`, `X\|join`, `X\|filter: …` and other list functions | list (`itemType: "text"` when the body/usage never touches item fields) |
 | `X.Y` | X is an object |
-| `X = "CA"` / `X = "NY"`, `pronoun(X, …)` | selection with those options |
-| names ending in Notes / Description / Address … | long text |
+| `X = "CA"` and `X = "NY"` — at least **two distinct** literals | selection with those options |
+| `X = "CA"` alone | text, with `CA` offered as a suggestion |
+| `pronoun(X, …)`, `salutation(X)`, names ending in Gender / Sex | selection `male` / `female` / `neutral` |
+| names ending in Description / Notes / Comments / Narrative / Recitals / Purpose / Address / Terms / Summary / Reason / Details | long text |
+| names ending in Email; names ending in Phone / Telephone / Mobile / Fax | email; phone |
+| everything else | text |
 
-Inside a list body, any name not defined at the top level of the template is assumed to be a field of the list item (`Children[].Name`). To reference a global variable from inside a list, reference it somewhere outside the list too (or use the `as` alias to make item fields explicit). Types and labels can be overridden in the Variables panel; those edits survive template changes.
+Name hints are camel-case aware (`StartDate` matches, `Candidate` does not) and only apply when no filter/comparison evidence is stronger.
 
-Inference caveats worth knowing when you read the generated questionnaire:
+Has-value checks: `{[if Court]} in the {[Court]}{[end if]}` (or `{[Court|upper]}`, a comparison, a function call) infers **text**, not boolean — a bare condition on a variable that is also printed is read as "has a value". `{[if Notes]}{[Notes]}{[end if]}` is long text by name. The demotion does not happen when the name says boolean (`{[if HasKids]}{[HasKids]}{[end if]}` stays Yes/No) or when a printed use carries boolean evidence (`{[Flag|format:"on":"off"]}`).
 
-- `X = "A"` … `{[else]}` infers a selection whose only options are the literals compared, so an `{[else]}` branch that means "any other value" (`Tone = "Cordial"` / else = Firm) yields a one-option selection. Compare every value explicitly (`{[else if Tone = "Firm"]}`) or set the options in the Variables panel.
-- Only the first filter applied directly to the variable counts: `{[Day|default:"1"|ordinal]}` stays text, `{[Day|ordinal|default:"1st"]}` becomes a number.
-- `pronoun`/`salutation` infer the options `male`/`female`/`neutral` (matching is case-insensitive; `Nonbinary` also works). Relabel the options in the Variables panel if you prefer.
-- A list used only with `|join` (a list of plain values) is inferred as `list`; set it to `multiselect` with options in the Variables panel.
+Whole filter chains are read: `{[Day|default:"1"|ordinal]}` → number, `{[Fee|default:0|currency]}` → currency, `{[Start|default:"…"|format:"long"]}` → date, `{[Flag|default:false|format:"yes":"no"]}` → boolean, `{[Gender|lower|pronoun:"subject"]}` → selection; function form works too (`ordinal(default(Day, "1"))`). A list reducer in the chain types the result, not the list: `{[Kids|count|ordinal]}` keeps `Kids` a list.
 
-Relevance: a variable is asked when it appears in a field whose enclosing conditions are currently true, or in a condition that has been reached. If a condition depends on unanswered variables, the questions inside it wait until the condition can be evaluated. Order follows first appearance in the template.
+Inside a list body, any name not defined at the top level of the template is assumed to be a field of the list item: in `{[Firm]}{[list Kids]}{[Name]} {[Firm]} {[Other]}{[end list]}`, `Name` and `Other` become `Kids[].Name` / `Kids[].Other` while `Firm` stays global. To reference a global variable from inside a list, reference it somewhere outside the list too (or use the `as` alias to make item fields explicit).
+
+Labels come from `humanize(path, type)`: `SigningDate` → "Signing date", `Client.IsMarried` → "Client — Is married?", `BuiltBefore1978` → "Built before 1978", `Address2` → "Address 2", `ROFRDays` → "ROFR days", `HOA.MonthlyFee` → "HOA — Monthly fee", `Children[].DOB` → "Children — DOB"; a boolean always ends with "?" (`humanize("Court", "boolean")` → "Court?").
+
+Overriding: anything inferred can be changed with a template annotation (`@type`, `@options`, `@label` …) or in the Variables panel; those edits survive template changes (see Template annotations for precedence). Switching a variable from `selection` to a non-choice type in the UI drops its `options` (the inferred ones are kept as suggestions and restored if the type goes back to `selection`). Caveats:
+
+- `pronoun`/`salutation` infer the options `male`/`female`/`neutral` (matching is case-insensitive; `Nonbinary` also works). Relabel the options if you prefer.
+- A list used only with `|join` (a list of plain values) is inferred as `list`; set it to `multiselect` with options if it should be a pick-many question.
+- `{[N|blank]}` traces `N` for relevance but never warns "Missing value".
 
 ## Coming from Knackly
 
@@ -264,9 +425,11 @@ import { compile, assemble, render, questionnaire, createModel } from './engine/
 
 const { ast, analysis, errors } = compile(templateText);   // never throws
 const { text, warnings, trace } = assemble(templateText, data);
-const questions = questionnaire(ast, data, model);          // [{path, label, type, required, options?, listPath?, answered, help?}]
+const questions = questionnaire(ast, data, model);          // [{path, label, type, required, answered, options?, suggestions?, itemType?, listPath?, help?, min?, max?, minLength?, maxLength?, pattern?, default?, fromTemplate?}]
 // `model` is optional: { variables: { 'Client.FullName': { label, type, options?, help?, required? } } }
 // overrides inferred labels/types (see the `model` export of each samples/*.js and mergeModel in model.js).
 ```
 
-Modules: `lexer.js` (tokenize) · `expr.js` (parseExpr / evalExpr / collectIdentifiers) · `functions.js` (built-ins, registerFunction) · `parser.js` (parse → AST) · `evaluate.js` (render, renderToBlocks) · `analyze.js` (analyze, relevantVariables, questionnaire, dependencyMap) · `model.js` (createModel, mergeModel, coerce, validate, computeDerived, emptyData).
+Modules: `lexer.js` (tokenize) · `expr.js` (parseExpr / evalExpr / collectIdentifiers) · `functions.js` (built-ins, registerFunction) · `parser.js` (parse → AST) · `evaluate.js` (render, renderToBlocks) · `analyze.js` (analyze, relevantVariables, questionnaire, dependencyMap, humanize, collectAnnotations, parseAnnotationLine, ANNOTATION_KEYS) · `model.js` (createModel, mergeModel, applyAnnotations, ANNOTATABLE, coerce, validate, computeDerived, emptyData, emptyItem, TYPES).
+
+`analyze(ast)` returns `{ variables, structure, annotations, annotationErrors }`; `createModel(analysis)` applies the annotations, `mergeModel(existing, analysis)` re-applies them while preserving UI edits, `validate(model, data, { relevant?, requiredOnly? })` returns `[{path, message}]`, and `computeDerived(model, data)` returns `{ data, errors }` — see the sections above.
