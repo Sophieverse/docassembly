@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DocAssembly</title>
+<link rel="stylesheet" href="app/styles.css">
+<script>
+  // Apply saved theme before first paint to avoid a flash.
+  try {
+    var s = JSON.parse(localStorage.getItem('docassembly.v1') || '{}');
+    var t = (s.settings && s.settings.theme) || 'light';
+    if (t === 'system') t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', t);
+  } catch (e) {}
+</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="topbar">
+  <a class="brand" href="#/templates" aria-label="DocAssembly home">
+    <span class="brand-mark" aria-hidden="true">D</span>
+    <span class="brand-name">DocAssembly</span>
+  </a>
+  <nav class="topnav" aria-label="Main">
+    <a href="#/templates" data-nav="templates">Templates</a>
+    <a href="#/records" data-nav="records">Records</a>
+    <a href="#/packages" data-nav="packages">Packages</a>
+    <a href="#/settings" data-nav="settings">Settings</a>
+    <a href="#/help" data-nav="help">Help</a>
+  </nav>
+  <div class="topbar-right">
+    <span class="firm-name" id="topbar-firm"></span>
+    <button class="btn btn-icon" id="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle theme">
+      <span class="theme-icon" aria-hidden="true"></span>
+    </button>
+  </div>
+</header>
+<main id="main" class="main" tabindex="-1"></main>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<div id="modals"></div>
+<noscript><p style="padding:2rem">DocAssembly requires JavaScript.</p></noscript>
+<script type="module" src="app/main.js"></script>
+</body>
+</html>
