@@ -118,3 +118,38 @@ All in `engine/analyze.js` unless noted; covered by `tests/engine-features-infer
 5. **`humanize(path, type?)`.** Digit boundaries (`BuiltBefore1978` → "Built before 1978", `Address2` → "Address 2"), all-caps acronyms kept (`ROFRDays` → "ROFR days", `HOA.MonthlyFee` → "HOA — Monthly fee"), and with `type === 'boolean'` a trailing "?" is guaranteed (`humanize('Court', 'boolean')` → "Court?"). `createModel` / `questionnaire` use the type-aware form; `mergeModel` recognizes such labels as inferred (not user edits) when the type later changes.
 6. **Lists of plain values.** A list with no item fields (`{[Names|join]}`, `{[list Tags]}{[_item]}{[end list]}`, `count(Pets)`) gets `VarInfo.itemType = 'text'`, copied to `def.itemType` and to the question as `{ type: 'list', itemType: 'text' }`. Lists whose body uses item fields (`{[list Kids]}{[Name]}{[end list]}`) have no `itemType`. UI: render an `itemType: 'text'` list as a simple repeatable text input (or textarea, one per line) producing `string[]`; `coerce(value, 'list')` still wraps a lone string.
 7. **`{[N|blank]}`** (and `blank(N)`) no longer emits "Missing value: N" (`engine/evaluate.js`); the path is still traced for relevance.
+
+## 6. Relevance and question order (fix round 2)
+
+All in `engine/analyze.js` / `engine/expr.js`; covered by `tests/engine-fix2-relevance-order.test.js`.
+
+### Relevance additions
+
+- **Every-branch rule.** When a gate is unanswered, a variable referenced on *every* remaining path through the `if` (each branch from the undecidable one on, and the `else`) is relevant now and, if blank, unanswered. It is listed right after the gate's own variables, and it is not in `blockedBy`. Without an `else` nothing is certain. Nested `if`s count only when the variable is on every path of the inner `if` too; a list body never counts (the list may be empty) but the list expression's variables do. Engagement Letter: `Client.FullName` is asked before `Client.IsEntity` is answered.
+- **Empty objects are unanswered.** `Client.Address: {}` (what `emptyData()` scaffolds) is treated like `undefined`: `{[if Client.Address]}` does not take the branch for relevance, and the evaluator traces `Client.Address` as missing. `truthy({})` is unchanged for expressions.
+- **Full paths in the trace.** `{[Client.Address.Street]}` with `Client` present but `Address` absent used to be traced as `Client.Address`, so the street question disappeared as soon as any other `Client.*` answer existed. The evaluator now records the whole path.
+
+### Question order
+
+`questionnaire()` shows only the currently relevant questions, but their *order* is a property of the template, not of the answers, so answering never reorders what is already on screen — it only inserts. The order key is computed by `questionOrder(relevant, analysis)` (exported from `analyze.js`):
+
+1. **Document position.** A variable sorts by its first reference anywhere in the template — field, condition or list expression, inside any branch, taken or not. Consequences: a condition's subjects always precede everything they gate; a variable used on every path through a gate follows the gate directly; a variable first printed deep in the document but used as a condition subject earlier sorts at that first condition.
+2. **Object grouping.** Every question under the same top-level root (`Client.*`, including `Client.Address.*`; `Trusts[].*` with its list) moves up to the root's first appearance and keeps document order within the group. Top-level scalars are their own group. Last Will: `Testator.Gender`, printed only in the attestation, is asked with the other `Testator.*` questions.
+
+The sort is stable, and both keys ignore the data, so `questionnaire(ast, data1)` and `questionnaire(ast, data2)` always agree on the relative order of the questions they share.
+
+### Required inference
+
+- A variable whose bare `{[if X]}` uses are has-value checks on a printed value (`{[if X]}…{[X]}`, `{[X|currency]}`, comparisons — anything that demotes it from boolean, or types it via a filter in the first place) gets `VarInfo.hasValueCheck = true` and `required: false` in `createModel`. The definition also carries `inferredRequired` so `mergeModel` can tell inference from a user edit: the user's `required` (or `custom.required`) and `@required`/`@optional` annotations win; a model saved before this change with the type default is treated as inference and re-inferred.
+- `validate()` therefore no longer reports `Relationship: ''` when `Relationship` is only used as `{[if Relationship]}…{[Relationship]}…`.
+
+### Per-item definitions without flags
+
+`computeDerived` and `validate` derive list-item-ness from the `[]` in the path (`Kids[].Age`) when a hand-built definition lacks `isListItemField` / `listPath`; an explicit `isListItemField: false` without `listPath` is respected.
+
+### What the UI must know
+
+- `Question.required` can now be `false` for plain text variables; keep rendering the "optional" state from it (no `required` attribute, no blocking on Finish).
+- Variable definitions gain `inferredRequired` (boolean) next to `inferredType` / `inferredOptions`; treat it as read-only. When the user toggles "required" in the Variables tab, set `custom.required = true` as for the other fields, otherwise a value equal to the inference is re-inferred on the next merge.
+- Questions may appear *between* existing ones when a gate is answered (they slot into their document/group position) rather than only at the end; keep keys by `path`, not by index.
+- DOCX import: `readDocx().text` no longer contains `**`, `*`, `__` or `\|` inside `{[ ]}` when Word split a placeholder across runs; a whole-field bold run still round-trips as `**{[X]}**`.

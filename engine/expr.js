@@ -247,7 +247,12 @@ export function truthy(v) {
   return true;
 }
 
-const isBlank = (v) => v == null || v === '' || (typeof v === 'number' && Number.isNaN(v));
+/** A plain object with no own keys — what the UI stores for an untouched object variable. */
+export function isEmptyObject(v) {
+  return v != null && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Date) && Object.getPrototypeOf(v) === Object.prototype && Object.keys(v).length === 0;
+}
+
+const isBlank = (v) => v == null || v === '' || (typeof v === 'number' && Number.isNaN(v)) || isEmptyObject(v);
 
 function isNumeric(v) {
   return (typeof v === 'number' && !Number.isNaN(v)) || (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v)));
@@ -446,14 +451,17 @@ function resolvePath(ast, scope, trace, functions) {
     const r = readProp(value, parts[i]);
     if (!r.found) {
       if (registryGet(valueMethods, parts[i]) && value != null && typeof value !== 'object') return { value: undefined, path, method: parts[i], receiver: value };
-      record(trace, 'referenced', path);
-      record(trace, 'missing', path);
-      return { value: undefined, path };
+      // Trace the *whole* path (`Client.Address.Street`, not just `Client.Address`) so relevance sees the same
+      // variable whether or not the parent object exists yet in the data.
+      const full = [path, ...parts.slice(i + 1)].join('.');
+      record(trace, 'referenced', full);
+      record(trace, 'missing', full);
+      return { value: undefined, path: full };
     }
     record(trace, 'referenced', path);
     value = r.value;
   }
-  if (value === undefined || value === null || value === '') record(trace, 'missing', path);
+  if (isBlank(value) && !(typeof value === 'number')) record(trace, 'missing', path);
   return { value, path };
 }
 

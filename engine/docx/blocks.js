@@ -207,15 +207,56 @@ function escapeText(s) {
   return out;
 }
 
+/**
+ * Split runs at `{[ ... ]}` boundaries computed over the paragraph's whole text, so a placeholder Word
+ * broke into differently formatted runs ("{[Client." + "**FullName**" + "]}") is seen as one field span.
+ * @returns {Array<{text:string, bold?:boolean, italic?:boolean, underline?:boolean, field:boolean}>}
+ */
+function splitRunsAtFields(runs) {
+  const full = runs.map((r) => r.text).join('');
+  const spans = []; // [start, end) of each field in `full`
+  let i = 0;
+  while (i < full.length) {
+    const s = full.indexOf('{[', i);
+    if (s === -1) break;
+    const e = full.indexOf(']}', s + 2);
+    const end = e === -1 ? full.length : e + 2;
+    spans.push([s, end]);
+    i = end;
+  }
+  const out = [];
+  let pos = 0, k = 0;
+  for (const r of runs) {
+    let start = pos;
+    const stop = pos + r.text.length;
+    while (start < stop) {
+      while (k < spans.length && spans[k][1] <= start) k++;
+      const sp = spans[k];
+      let cut, field;
+      if (sp && sp[0] <= start) { cut = Math.min(sp[1], stop); field = sp[0] === start ? 'start' : 'inside'; }
+      else { cut = sp ? Math.min(sp[0], stop) : stop; field = false; }
+      out.push({ ...r, text: r.text.slice(start - pos, cut - pos), field });
+      start = cut;
+    }
+    pos = stop;
+  }
+  return out;
+}
+
 export function runsToInline(runs) {
   const cur = { bold: false, italic: false, underline: false };
   const marker = { bold: '**', italic: '*', underline: '__' };
   let out = '';
-  for (const r of runs || []) {
+  const pieces = splitRunsAtFields((runs || []).filter((r) => r.text).map((r) => ({ ...r, text: r.text.replace(/\n/g, ' ') })));
+  for (const r of pieces) {
     if (!r.text) continue;
+    // A field takes the formatting of the run it starts in (so a bold `**{[Name]}**` survives). Formatting
+    // changes *inside* a {[ ]} field are noise (Word split the placeholder across runs): emit the raw text
+    // with no markers and no escapes, keeping whatever formatting state is open.
+    if (r.field === 'inside') { out += r.text; continue; }
     for (const f of ['underline', 'italic', 'bold']) if (cur[f] && !r[f]) { out += marker[f]; cur[f] = false; }
     for (const f of ['bold', 'italic', 'underline']) if (!cur[f] && r[f]) { out += marker[f]; cur[f] = true; }
-    out += escapeText(r.text.replace(/\n/g, ' '));
+    out += r.field ? r.text : escapeText(r.text);
   }
   for (const f of ['underline', 'italic', 'bold']) if (cur[f]) out += marker[f];
   return out;

@@ -5,7 +5,7 @@
  * auto-questionnaire.
  */
 
-import { collectIdentifiers, collectFunctions, evalExpr, createScope, createTrace, truthy, pathOf, listIdentity, stripPuncFilter } from './expr.js';
+import { collectIdentifiers, collectFunctions, evalExpr, createScope, createTrace, truthy, pathOf, listIdentity, stripPuncFilter, isEmptyObject } from './expr.js';
 import { functions as builtins } from './functions.js';
 import { itemVars } from './evaluate.js';
 
@@ -21,6 +21,8 @@ import { itemVars } from './evaluate.js';
  * @property {string[]} filters       filter/function names applied to it
  * @property {boolean} isListItemField
  * @property {string|null} listPath   the list this item field belongs to
+ * @property {boolean} [hasValueCheck] the variable's `{[if X]}` uses are "has a value" checks on a printed value
+ *                                    (so it is optional by nature — the template already copes with it blank)
  */
 
 const LIST_FUNCS = new Set(['count', 'sum', 'any', 'all', 'first', 'last', 'join', 'sort', 'sortby', 'filter', 'where', 'map', 'pluck', 'reverse', 'unique', 'punc', 'len', 'length']);
@@ -283,6 +285,9 @@ export function analyze(ast) {
       if (v.altRank >= 0) { v.inferredType = v.altType; v.typeRank = v.altRank; }
       else { v.inferredType = 'text'; v.typeRank = -1; for (const [re, t] of NAME_HINTS) if (re.test(v.name)) { setType(v, t, Math.max(TYPE_RANK[t] ?? 0, 2)); break; } }
     }
+    // Either way (demoted here, or typed by a filter such as `{[Fee|currency]}` in the first place), a bare
+    // `{[if X]}` on a printed non-boolean is a has-value check: the template already copes with X blank.
+    if (v.bareCond && v.nonBareUse && v.inferredType !== 'boolean' && !nameForcesBoolean(v)) v.hasValueCheck = true;
     // A single literal comparison (`{[if State = "CA"]}…{[else]}`) is not enough for a choice list:
     // keep it text and offer the literal as a suggestion (options → model.inferredOptions).
     if (v.inferredType === 'selection' && (!v.options || v.options.length < 2)) {
@@ -409,7 +414,7 @@ const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 /** A property name that is safe to read/write on plain data objects. */
 export function isSafeKey(key) { return !UNSAFE_KEYS.has(String(key).toLowerCase()); }
 
-const isBlankValue = (v) => v === undefined || v === null || v === '' || (typeof v === 'number' && Number.isNaN(v));
+const isBlankValue = (v) => v === undefined || v === null || v === '' || (typeof v === 'number' && Number.isNaN(v)) || isEmptyObject(v);
 
 /**
  * Read a dotted path (case-insensitive fallback) from data. "Children[0].Name" is supported.
@@ -434,7 +439,10 @@ export function getPath(data, path) {
  * - Variables in text/fields are relevant when every enclosing branch currently holds.
  * - Condition variables are relevant as soon as the condition is reached.
  * - If a condition references unanswered variables, its branches' contents are not yet
- *   relevant (recorded in `blockedBy`), but the condition's own variables are.
+ *   relevant (recorded in `blockedBy`), but the condition's own variables are — and so is any
+ *   variable referenced on *every* remaining path through the `if` (each branch and the `else`),
+ *   since it will be asked whichever way the gate is answered; it is ordered right after the gate.
+ * - An empty plain object (`Client.Address: {}`) counts as unanswered, like `undefined`.
  * - Lists: the list variable is relevant; item fields are relevant per item
  *   (generic path "Children[].Name" in `relevant`, per-item "Children[0].Name" in `unanswered`).
  *
@@ -546,6 +554,42 @@ export function relevantVariables(ast, data, options = {}) {
     return out;
   };
 
+  /**
+   * Variables referenced on every path through a body (generic paths): fields and condition subjects
+   * at this level, plus what is definite in *all* branches of an `if` that has an `else`. List bodies
+   * are never definite (the list may be empty); the list expression's own variables are.
+   */
+  const definiteVars = (nodes, lists) => {
+    const out = new Set();
+    const res = (p) => {
+      const segs = p.split('.');
+      if (segs[0].startsWith('_')) return null;
+      for (let i = lists.length - 1; i >= 0; i--) if (lists[i].itemName && segs[0] === lists[i].itemName) return segs.length > 1 ? lists[i].prefix + '.' + segs.slice(1).join('.') : lists[i].prefix.slice(0, -2);
+      if (lists.length) { const cand = lists[lists.length - 1].prefix + '.' + p; if (analysis.variables.has(cand)) return cand; }
+      return p;
+    };
+    for (const n of nodes) {
+      if (n.type === 'field') collectIdentifiers(n.expr).map(res).forEach((p) => p && out.add(p));
+      else if (n.type === 'list') collectIdentifiers(n.expr).map(res).forEach((p) => p && out.add(p));
+      else if (n.type === 'if') {
+        collectIdentifiers(n.branches[0].cond).map(res).forEach((p) => p && out.add(p));
+        for (const p of definiteAcross(n, 0, lists)) out.add(p);
+      }
+    }
+    return out;
+  };
+  /** Intersection of definiteVars over branches[from..] and the else body; empty without an else. */
+  const definiteAcross = (n, from, lists) => {
+    if (!n.elseBody) return new Set();
+    let acc = null;
+    for (const body of [...n.branches.slice(from).map((b) => b.body), n.elseBody]) {
+      const d = definiteVars(body, lists);
+      acc = acc === null ? d : new Set([...acc].filter((p) => d.has(p)));
+      if (!acc.size) break;
+    }
+    return acc || new Set();
+  };
+
   const walkBody = (nodes, scope, lists) => {
     for (const n of nodes) {
       switch (n.type) {
@@ -556,15 +600,26 @@ export function relevantVariables(ast, data, options = {}) {
             const r = evalIn(b.cond, scope);
             noteRefs(r.referenced, scope);
             if (r.missing.length) {
-              // cannot decide: everything below is blocked by this condition
+              const bi = n.branches.indexOf(b);
+              // Whatever the answer, these will be asked: make them relevant now, right after the gate.
+              for (const p of definiteAcross(n, bi, lists)) {
+                if (!isLeaf(p) || analysis.variables.get(p)?.inferredType === 'object') continue;
+                const idx = p.lastIndexOf('[]');
+                if (idx !== -1 && !scopeHasPrefix(scope, p.slice(0, idx + 2))) continue; // item of a list inside the branch
+                addRelevant(p);
+                const v = lookupConcrete(p, scope);
+                values.set(p, v);
+                if (isBlankValue(v) && !(analysis.variables.get(p)?.inferredType === 'list' && Array.isArray(v))) addUnanswered(concretize(p, scope));
+              }
+              // cannot decide: everything else below is blocked by this condition
               const blockedVars = [...staticVars(b.body, lists)];
-              for (const nb of n.branches.slice(n.branches.indexOf(b) + 1)) blockedVars.push(...collectIdentifiers(nb.cond), ...staticVars(nb.body, lists));
+              for (const nb of n.branches.slice(bi + 1)) blockedVars.push(...collectIdentifiers(nb.cond), ...staticVars(nb.body, lists));
               if (n.elseBody) blockedVars.push(...staticVars(n.elseBody, lists));
               for (const v of blockedVars) if (!relevantSet.has(v)) block(v, b.src);
               done = true;
               break;
             }
-            if (truthy(r.value)) { walkBody(b.body, scope, lists); done = true; break; }
+            if (truthy(r.value) && !isEmptyObject(r.value)) { walkBody(b.body, scope, lists); done = true; break; } // `{}` = unanswered
           }
           if (!done && n.elseBody) walkBody(n.elseBody, scope, lists);
           break;
@@ -609,7 +664,7 @@ export function questionnaire(ast, data, model) {
   const rel = relevantVariables(ast, data, { analysis });
   const out = [];
   const seen = new Set();
-  for (const path of rel.relevant) {
+  for (const path of questionOrder(rel.relevant, analysis)) {
     const info = analysis.variables.get(path);
     const def = model && model.variables ? model.variables[path] : null;
     const type = def ? def.type : info ? info.inferredType : 'text';
@@ -639,6 +694,31 @@ export function questionnaire(ast, data, model) {
   }
   return out;
 }
+
+/**
+ * Question order (see docs/engine-additions.md "Question order"). Only currently relevant questions are
+ * shown, but their *order* is a property of the template, not of the answers, so answering never reorders:
+ * 1. document position — a variable sorts by its first reference anywhere in the template (field, condition
+ *    or list expression, inside any branch). A condition's subjects therefore precede everything they gate,
+ *    and a variable used on every path through a gate follows the gate directly.
+ * 2. object grouping — every question under the same top-level root (`Client.*`, `Trusts[].*`) is moved up
+ *    to the root's first appearance, keeping document order within the group. Top-level scalars are their own
+ *    group.
+ * Without `analysis`, the incoming (relevance) order is the position key.
+ * @param {string[]} relevant generic paths in relevance order
+ * @param {{variables: Map<string, Object>}} [analysis] from analyze(); its insertion order is document order
+ * @returns {string[]}
+ */
+export function questionOrder(relevant, analysis) {
+  const pos = new Map();
+  if (analysis && analysis.variables) { let i = 0; for (const p of analysis.variables.keys()) pos.set(p, i++); }
+  const n = pos.size;
+  const key = (p, i) => (pos.has(p) ? pos.get(p) : n + i);
+  const anchor = new Map();
+  relevant.forEach((p, i) => { const root = rootOf(p); const k = key(p, i); if (!anchor.has(root) || k < anchor.get(root)) anchor.set(root, k); });
+  return relevant.map((p, i) => ({ p, i, k: key(p, i), a: anchor.get(rootOf(p)) })).sort((x, y) => x.a - y.a || x.k - y.k || x.i - y.i).map((x) => x.p);
+}
+const rootOf = (p) => p.split('.')[0].replace(/\[\]$/, '');
 
 /**
  * Designer view: for each variable, the conditions/sections it gates.

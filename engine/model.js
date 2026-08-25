@@ -59,7 +59,8 @@ function defFromInfo(info) {
     label: humanize(info.path, info.inferredType),
     type: info.inferredType,
     inferredType: info.inferredType,
-    required: !['object', 'list', 'boolean'].includes(info.inferredType),
+    required: inferredRequired(info),
+    inferredRequired: inferredRequired(info),
     options: info.options && ['selection', 'multiselect'].includes(info.inferredType) ? [...info.options] : undefined,
     inferredOptions: info.options ? [...info.options] : undefined,
     itemType: info.itemType || undefined,
@@ -93,6 +94,8 @@ export function createModel(analysis) {
 export const ANNOTATABLE = ['label', 'help', 'options', 'default', 'required', 'type', 'formula', 'min', 'max', 'minLength', 'maxLength', 'pattern', 'validate', 'message'];
 
 const defaultRequired = (type) => !['object', 'list', 'boolean', 'computed'].includes(type);
+/** Inferred `required`: by type, except a has-value check (`{[if X]}…{[X]}`) — the template already handles a blank X. */
+const inferredRequired = (info) => defaultRequired(info.inferredType) && !info.hasValueCheck;
 
 function segmentsOf(path) {
   const segs = String(path).split('.');
@@ -146,7 +149,7 @@ function inferredBaseline(field, fresh, e) {
   switch (field) {
     case 'label': return humanize(fresh.path, e.inferredType);
     case 'type': return e.inferredType;
-    case 'required': return defaultRequired(e.inferredType);
+    case 'required': return fresh.inferredRequired !== undefined ? fresh.inferredRequired : e.inferredRequired !== undefined ? e.inferredRequired : defaultRequired(e.inferredType);
     case 'help': return '';
     case 'options': return e.inferredOptions;
     default: return undefined;
@@ -167,6 +170,8 @@ function isUserEdited(e, field, fresh) {
   if (field === 'options') { if (e.fromTemplate && 'options' in e.fromTemplate && same(v, e.fromTemplate.options)) return false; return userChangedOptions(e, fresh); }
   if (e.fromTemplate && field in e.fromTemplate && same(v, e.fromTemplate[field])) return false;
   if (same(v, inferredBaseline(field, fresh, e))) return false;
+  // a model saved before `inferredRequired` existed carries the type default; that is inference, not a user edit
+  if (field === 'required' && e.inferredRequired === undefined && same(v, defaultRequired(e.inferredType))) return false;
   if (field === 'formula') return v !== undefined && v !== '';
   return !same(v, undefined);
 }
@@ -202,7 +207,7 @@ export function mergeModel(existing, analysis) {
     const e = existingVars[path];
     if (!e) { out.variables[path] = f; out.order.push(path); continue; }
     // Spread the existing definition first so user-owned fields (default, custom…) survive.
-    const merged = { ...e, ...f, inferredType: f.inferredType, inferredOptions: f.inferredOptions, orphaned: false, custom: e.custom };
+    const merged = { ...e, ...f, inferredType: f.inferredType, inferredOptions: f.inferredOptions, inferredRequired: f.inferredRequired, orphaned: false, custom: e.custom };
     const userEdited = {};
     for (const field of ANNOTATABLE) {
       userEdited[field] = isUserEdited(e, field, f);
@@ -327,6 +332,18 @@ function forEachItem(data, listPath, fn, rootScope) {
   rec(data || {}, listPath, '', root);
 }
 
+/**
+ * The list an item-field definition belongs to ("Kids" for "Kids[].Age"), from `def.listPath` /
+ * `def.isListItemField` when set, else from the `[]` in the path. `null` for top-level variables.
+ */
+function listPathOf(def, path = def.path) {
+  const p = String(path || '');
+  const idx = p.lastIndexOf('[].');
+  if (def.isListItemField === false && !def.listPath) return null;
+  if (def.listPath && (def.isListItemField || idx !== -1)) return def.listPath;
+  return idx === -1 ? null : p.slice(0, idx);
+}
+
 const RULE_CACHE = new Map();
 function compiledRule(src) {
   if (!RULE_CACHE.has(src)) { try { RULE_CACHE.set(src, parseExpr(src)); } catch (e) { RULE_CACHE.set(src, e); } }
@@ -436,10 +453,11 @@ export function validate(model, data, options = {}) {
   for (const path of paths) {
     const def = model.variables[path];
     if (!def || def.orphaned || def.type === 'computed' || def.type === 'object') continue;
-    if (def.isListItemField && def.listPath) {
+    const listPath = listPathOf(def, path);
+    if (listPath) {
       const sub = path.slice(path.lastIndexOf('[].') + 3); // strip "…List[]."
       const only = relevant && !relevant.has(path) ? concreteByGeneric.get(path) : null;
-      forEachItem(data, def.listPath, (item, i, n, concrete, scope) => {
+      forEachItem(data, listPath, (item, i, n, concrete, scope) => {
         const itemPath = `${concrete}.${sub}`;
         if (only && !only.has(itemPath)) return;
         check(def, getPath(item, sub), itemPath, scope);
@@ -491,7 +509,7 @@ export function computeDerived(model, data) {
   const errors = [];
   const vars = model.variables || {};
   const computed = (model.order || []).filter((p) => vars[p] && vars[p].type === 'computed' && vars[p].formula && !vars[p].orphaned);
-  const listOf = (p) => { const d = vars[p]; return d.isListItemField ? (d.listPath || p.slice(0, p.lastIndexOf('[]'))) : null; };
+  const listOf = (p) => listPathOf(vars[p], p);
   const asts = new Map();
   const deps = new Map();
   for (const p of computed) {
