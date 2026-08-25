@@ -51,3 +51,12 @@ Run flags are only present when true (so blocks compare with deepEqual after a r
   records:   {id: {id, name, data, createdAt, updatedAt}},
   packages:  {id: {id, name, items:[{templateId, includeIf?}], createdAt, updatedAt}},
   settings:  {firmName, attorneyName, defaultFont, defaultFontSize, theme} }
+
+## DOCX reader/writer notes (post-QA)
+- Reader: section-break paragraphs (`pPr/sectPr`) are dropped at end / become page breaks mid-document (unless continuous);
+  `w:pageBreakBefore` → pagebreak block; `mc:AlternateContent` uses `mc:Fallback`; OLE/CFB input → clear ".doc" error;
+  non-zip input → "not a .docx" error; parser never hangs on unterminated comments/PI/CDATA; entry size bounded (50 MB).
+- Writer: direct font/size on every run (Title +8pt, H1 +4, H2 +2) and direct center on Title because Apple's importer
+  ignores styles.xml/numbering.xml; bold/italic remain style-driven so `**x**` in headings round-trips exactly.
+- Text model: runs of 3+ underscores are literal (signature lines); leading spaces only mean nesting for list items;
+  lettered/roman markers count as list items only when indented; level-2 numbering renders as roman numerals.
