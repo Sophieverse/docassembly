@@ -15,7 +15,8 @@ Everything runs in the browser from static files. **No server, no accounts, no d
 3. Answer the questions and watch new ones appear as you go (married → spouse; children → guardian).
 4. **Generate** → preview → **Download .docx**.
 
-To run the test suite: `node --test tests/` (Node 20+, no dependencies).
+To run the test suite: `node --test tests/` (Node 20+, no dependencies). Browser end-to-end journeys:
+`node tools/e2e/run.js` (needs Google Chrome).
 
 ## How it works
 
@@ -49,8 +50,16 @@ The template language is compatible with Knackly's `{[ ]}` syntax (if/elseif/els
 - **Records** — client/matter answer sets, reused across every template; JSON export/import.
 - **Packages** — one questionnaire → a whole set of documents, each with an optional inclusion condition
   (Knackly "apps").
-- **Import .docx** — existing Word documents become templates (placeholders split by Word's run
-  formatting are reassembled).
+- **Word templates (in-place fill)** — keep your existing Word document as the template: put `{[ ]}` tags in
+  Word, import it, and generated documents keep *all* Word formatting, styles, numbering, headers/footers and
+  tables — only the tags are resolved (paragraph-level `{[if]}` markers remove whole paragraphs; a table row
+  containing `{[list X]}…{[endlist]}` repeats per item). Or convert a .docx to an editable text template.
+- **Template annotations** — labels, help text, options, defaults, types and rules live in the template so it
+  stays the single source of truth: `{[# @label Client.FullName: Client's full legal name]}`,
+  `{[# @validate Members: sum(Members, "Percent") = 100 :: Percentages must total 100%]}`.
+- **Validation & computed fields** — min/max/pattern/expression rules with inline messages; computed variables
+  (top-level and per list item, e.g. `Children[].IsMinor = yearsBetween(DOB, today()) < 18`) that drive logic
+  without being asked.
 - **Output** — .docx (styles, headings, numbered lists, tables, page breaks), print/PDF, copy text.
 - **100+ helper functions** — number-to-words, dollars in words, ordinals, date math & legal date
   formats, pronouns, plurals, is/are, a/an, possessives, list punctuation, HotDocs-style format-by-example.
@@ -60,7 +69,7 @@ The template language is compatible with Knackly's `{[ ]}` syntax (if/elseif/els
 ```
 index.html    app/ (UI)    engine/ (template language, analysis, model)    engine/docx/ (zero-dep DOCX read/write)
 samples/ (7 templates: engagement letter, will, LLC operating agreement, lease, NDA, demand letter, tutorial)
-tests/ (node --test)    docs/ (research on Knackly, competitors, attorney needs)
+tests/ (node --test, 300+ tests)    tools/e2e/ (headless-Chrome journeys)    docs/ (research + engine reference)
 ```
 
 ## Disclaimer
