@@ -22,6 +22,9 @@ export const text = `{[# =======================================================
    100%, Disregarded with several members, Partnership with one member).
    Layout convention: optional blocks begin with a blank line INSIDE the {[if]}.
    ============================================================ ]}
+{[# @min Members[].Percent: 0
+@max Members[].Percent: 100
+@validate Members: sum(Members, "Percent") = 100 :: Membership percentages must total 100% ]}
 >title OPERATING AGREEMENT
 >title OF
 >title {[Company.Name|upper]}

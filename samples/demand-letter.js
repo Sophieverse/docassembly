@@ -21,6 +21,7 @@ export const text = `{[# =======================================================
    The letter is dated today() at assembly time.
    Layout convention: optional blocks begin with a blank line INSIDE the {[if]}.
    ============================================================ ]}
+{[# @validate DeadlineDays: value >= 1 :: Give at least one day to respond ]}
 >right {[Sender.Name]}
 >right {[Sender.Address.Street]}
 >right {[Sender.Address.City]}, {[Sender.Address.State]} {[Sender.Address.Zip]}

@@ -1,12 +1,36 @@
 /**
  * Tutorial sample — teaches the template syntax in a few lines.
  */
+import { parse, analyze, createModel } from '../engine/index.js';
+
 export const id = 'tutorial';
-export const name = 'Tutorial: Template Syntax in 25 Lines';
-export const description = 'A tiny walkthrough of fields, if/else, lists with _punc, and filters. Start here.';
+export const name = 'Tutorial: Template Syntax in 30 Lines';
+export const description = 'A tiny walkthrough of @annotations, fields, if/else, lists with _punc, and filters. Start here.';
 export const category = 'Tutorial';
 
-export const text = `>title Welcome, {[Client.FullName]}
+export const text = `{[# ANNOTATIONS live in comments and shape the questionnaire without leaving the template.
+   One "@key Path: value" per line. @label names a question, @help adds a hint,
+   @options turns a text field into a pick-list, @type/@required override inference,
+   @min/@max bound numbers and dates, and @validate adds a rule ("expr :: message").
+   Inside a rule, "value" is the answer being checked. ]}
+{[# @label Client.FullName: Client's full legal name
+@label Client.IsEntity: Is the client a business entity (not an individual)?
+@label Client.EntityType: Type of entity (e.g., Delaware corporation)
+@help Client.EntityType: Leave blank to print "business entity".
+@required Client.EntityType: false
+@label Client.IsMarried: Is the client married?
+@label Client.Gender: Client's pronouns
+@options Client.Gender: Male | Female | Nonbinary
+@label SigningDate: Date of this letter
+@label Children: Client's children
+@label Children[].Name: Child's name
+@label Children[].DOB: Child's date of birth
+@validate Children[].DOB: value <= today() :: A date of birth cannot be in the future
+@label Fee: Fee
+@type Fee: currency
+@min Fee: 0
+@label Attorney.Name: Attorney's name ]}
+>title Welcome, {[Client.FullName]}
 {[# A COMMENT starts with a hash; it is a drafter note and never appears in the output.]}
 {[# A FIELD merges a value: ]}
 This letter was prepared on {[SigningDate|format:"long"]} for {[Client.FullName|upper]}.
@@ -48,23 +72,10 @@ export const sampleAnswers = {
 };
 
 /**
- * Questionnaire overrides (labels, types, options, help) in the shape of
- * model.variables from engine/model.js. Merged over the inferred model.
+ * The questionnaire model is built from the template itself: every label, help text,
+ * option list and rule above comes from the @annotations, so the template is the
+ * single source of truth. (Other samples ship a hand-written `model` instead.)
  */
-export const model = {
-  variables: {
-    'Client.FullName': { label: "Client's full legal name", type: 'text' },
-    'Client.IsEntity': { label: 'Is the client a business entity (not an individual)?', type: 'boolean' },
-    'Client.EntityType': { label: 'Type of entity (e.g., Delaware corporation)', type: 'text', help: 'Leave blank to print "business entity".' },
-    'Client.IsMarried': { label: 'Is the client married?', type: 'boolean' },
-    'Client.Gender': { label: "Client's pronouns", type: 'selection', options: ['Male', 'Female', 'Nonbinary'] },
-    SigningDate: { label: 'Date of this letter', type: 'date' },
-    Children: { label: "Client's children", type: 'list' },
-    'Children[].Name': { label: "Child's name", type: 'text' },
-    'Children[].DOB': { label: "Child's date of birth", type: 'date' },
-    Fee: { label: 'Fee', type: 'currency' },
-    'Attorney.Name': { label: "Attorney's name", type: 'text' },
-  },
-};
+export const model = createModel(analyze(parse(text)));
 
 export default { id, name, description, category, text, sampleAnswers, model };

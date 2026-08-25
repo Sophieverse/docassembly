@@ -14,10 +14,10 @@ export const text = `{[# =======================================================
    Key branches:
      Testator.Gender (Male | Female | Nonbinary) -> pronouns via |pronoun
      IsMarried                    -> spouse article + 30-day survivorship
-     any child under 18 today     -> guardianship article; computed from DOB with
-                                     Children|any: yearsBetween(DOB, today()) < 18
-                                     (nothing to ask — the questionnaire never
-                                     shows an "Is minor?" question)
+     any child under 18 today     -> guardianship article. Children[].IsMinor is a
+                                     per-item COMPUTED field in the model (formula
+                                     yearsBetween(DOB, today()) < 18); nothing to ask —
+                                     the questionnaire never shows an "Is minor?" question
      DistributionMethod           -> "Per Stirpes" | "Per Capita" | "Named Beneficiaries"
      count(SpecificGifts) > 0     -> specific gifts article
      NoContest, PetTrust          -> optional articles
@@ -86,32 +86,32 @@ Under the per capita at each generation method, my estate is divided into equal 
 
 If no descendant of mine survives me, my residuary estate shall pass to my heirs at law determined under the laws of {[Testator.State]} as if I had died intestate at that time.
 {[end if]}
-{[if Children|any: yearsBetween(DOB, today()) < 18]}
+{[if Children|any: IsMinor]}
 
 # ARTICLE {[roman(4 + (count(SpecificGifts) > 0 ? 1 : 0) + (PetTrust ? 1 : 0))]} — GUARDIAN OF MINOR CHILDREN
 
 {[# Rendered only when at least one child is under 18 today. ]}
 If at my death any child of mine is a minor{[if IsMarried]} and my spouse does not survive me or is unable to act{[end if]}, I nominate **{[Guardian.FullName]}**{[if Guardian.Relationship]}, my {[Guardian.Relationship]},{[end if]} as guardian of the person and estate of each such minor child. If {[Guardian.FullName]} is unable or unwilling to serve, I nominate **{[AlternateGuardian.FullName]}** to serve instead. No bond shall be required of any guardian named in this Will.
 
-Minor children as of the date of this Will: {[list Children|filter: yearsBetween(DOB, today()) < 18]}{[FullName]} (age {[yearsBetween(DOB, today())]}){[_punc]}{[end list]}.
+Minor children as of the date of this Will: {[list Children|filter: IsMinor]}{[FullName]} (age {[yearsBetween(DOB, today())]}){[_punc]}{[end list]}.
 
 **Property of minors.** Any property passing under this Will to a person under the age of {[CustodianshipAge|default:"21"]} shall be held by my Executor, as custodian under the {[Testator.State]} Uniform Transfers to Minors Act, until that person reaches such age.
 {[end if]}
 
-# ARTICLE {[roman(4 + (count(SpecificGifts) > 0 ? 1 : 0) + (PetTrust ? 1 : 0) + ((Children|any: yearsBetween(DOB, today()) < 18) ? 1 : 0))]} — EXECUTOR
+# ARTICLE {[roman(4 + (count(SpecificGifts) > 0 ? 1 : 0) + (PetTrust ? 1 : 0) + ((Children|any: IsMinor) ? 1 : 0))]} — EXECUTOR
 
 I nominate **{[Executor.FullName]}**{[if Executor.Relationship]}, my {[Executor.Relationship]},{[end if]} as Executor of this Will.{[if count(AlternateExecutors) > 0]} If my Executor is unable or unwilling to serve, or ceases to serve, I nominate the following, in the order listed, to serve as successor Executor: {[list AlternateExecutors]}{[FullName]}{[_punc]}{[end list]}.{[end if]}
 
 No Executor named in this Will shall be required to post bond or other security in any jurisdiction. My Executor shall have all powers granted to executors under the laws of {[Testator.State]}, including the power to sell, lease, or encumber real and personal property without court order{[if IndependentAdministration]}, and I request that my estate be administered with as little court supervision as the law permits{[end if]}.
 {[if NoContest]}
 
-# ARTICLE {[roman(5 + (count(SpecificGifts) > 0 ? 1 : 0) + (PetTrust ? 1 : 0) + ((Children|any: yearsBetween(DOB, today()) < 18) ? 1 : 0))]} — NO-CONTEST CLAUSE
+# ARTICLE {[roman(5 + (count(SpecificGifts) > 0 ? 1 : 0) + (PetTrust ? 1 : 0) + ((Children|any: IsMinor) ? 1 : 0))]} — NO-CONTEST CLAUSE
 
 {[# Enforceability varies by state (e.g., Florida and Indiana do not enforce these). ]}
 If any beneficiary under this Will, directly or indirectly, contests or attacks this Will or any of its provisions without probable cause, any share or interest given to that beneficiary is revoked and shall be disposed of as if that beneficiary had predeceased me without descendants.
 {[end if]}
 
-# ARTICLE {[roman(5 + (count(SpecificGifts) > 0 ? 1 : 0) + (PetTrust ? 1 : 0) + ((Children|any: yearsBetween(DOB, today()) < 18) ? 1 : 0) + (NoContest ? 1 : 0))]} — GENERAL PROVISIONS
+# ARTICLE {[roman(5 + (count(SpecificGifts) > 0 ? 1 : 0) + (PetTrust ? 1 : 0) + ((Children|any: IsMinor) ? 1 : 0) + (NoContest ? 1 : 0))]} — GENERAL PROVISIONS
 
 **Survivorship.** Except as otherwise provided, a beneficiary must survive me by thirty (30) days to take under this Will.
 
@@ -203,6 +203,7 @@ export const model = {
     Children: { label: 'Children (living)', type: 'list' },
     'Children[].FullName': { label: "Child's full name", type: 'text' },
     'Children[].DOB': { label: "Child's date of birth", type: 'date', help: 'Used to decide whether the guardianship article is needed.' },
+    'Children[].IsMinor': { label: 'Is a minor (computed)', type: 'computed', formula: 'yearsBetween(DOB, today()) < 18', isListItemField: true, listPath: 'Children' },
     SpecificGifts: { label: 'Specific gifts', type: 'list' },
     'SpecificGifts[].Description': { label: 'Property given (e.g., "my 2019 Honda Civic")', type: 'longtext' },
     'SpecificGifts[].Beneficiary': { label: 'Beneficiary', type: 'text' },

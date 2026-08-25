@@ -20,6 +20,8 @@ export const text = `{[# =======================================================
    Layout convention: an optional block starts with a blank line INSIDE the
    {[if]} so that removing it never leaves a double blank line behind.
    ============================================================ ]}
+{[# @min HourlyRate: 0
+@max ContingencyPercent: 100 ]}
 >right {[Firm.Name]}
 >right {[Firm.Address.Street]}
 >right {[Firm.Address.City]}, {[Firm.Address.State]} {[Firm.Address.Zip]}

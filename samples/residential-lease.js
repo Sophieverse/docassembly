@@ -19,6 +19,7 @@ export const text = `{[# =======================================================
    Section numbers after the lead-paint disclosure are computed.
    Layout convention: optional blocks begin with a blank line INSIDE the {[if]}.
    ============================================================ ]}
+{[# @validate LeaseEnd: value > LeaseStart :: End date must be after start ]}
 >title RESIDENTIAL LEASE AGREEMENT
 
 This Residential Lease Agreement (this "Lease") is made on {[LeaseDate|format:"long"]} between **{[Landlord.FullName]}** ("Landlord"), whose address for notices is {[Landlord.Address]}, and {[list Tenants]}**{[FullName]}**{[_punc]}{[end list]} ({[if count(Tenants) > 1]}collectively and individually, "Tenant"{[else]}"Tenant"{[end if]}).
