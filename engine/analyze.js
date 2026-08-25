@@ -8,6 +8,7 @@
 import { collectIdentifiers, collectFunctions, evalExpr, createScope, createTrace, truthy, pathOf, listIdentity, stripPuncFilter, isEmptyObject } from './expr.js';
 import { functions as builtins } from './functions.js';
 import { itemVars } from './evaluate.js';
+import { TemplateError } from './lexer.js';
 
 /**
  * @typedef {Object} VarInfo
@@ -114,17 +115,22 @@ export function analyze(ast) {
   const ensure = (path, ctx) => {
     if (variables.has(path)) return variables.get(path);
     const segs = segments(path);
+    // `{[Client.constructor]}` / `{[__proto__.x]}` would compile into a variable no answer can ever reach
+    // (getPath/setPath refuse those keys): reject at compile time, as a template error.
+    for (const s of segs) if (!isSafeKey(s.replace(/\[\]$/, ''))) throw new TemplateError(`"${path}" is not a valid variable name (${s.replace(/\[\]$/, '')} is reserved)`, ctx && ctx.line, ctx && ctx.col);
     const name = segs[segs.length - 1];
     let parent = segs.length > 1 ? segs.slice(0, -1).join('.') : null;
     let isListItemField = false, listPath = null;
     if (parent && parent.endsWith('[]')) { listPath = parent.slice(0, -2); parent = listPath; isListItemField = true; }
     else if (parent && parent.includes('[]')) { isListItemField = true; listPath = parent.slice(0, parent.lastIndexOf('[]')); }
+    // A list is registered before its item fields so it always precedes them in discovery (question) order, even
+    // when a concrete-index reference (`{[Trusts[0].Name]}`) appears before the `{[list Trusts]}` block. Object
+    // parents keep following their first field, as before.
+    const isList = isListItemField && listPath === parent;
+    const p = parent && isList ? ensure(parent, ctx) : null;
     const info = { path, name, parent, inferredType: 'text', typeRank: -1, altType: 'text', altRank: -1, options: undefined, usedIn: [], gatedBy: [], filters: [], isListItemField, listPath, contexts: new Set() };
     variables.set(path, info);
-    if (parent) {
-      const p = ensure(parent, ctx);
-      setType(p, isListItemField && listPath === parent ? 'list' : 'object', 10);
-    }
+    if (parent) setType(p || ensure(parent, ctx), isList ? 'list' : 'object', 10);
     return info;
   };
 
@@ -162,7 +168,7 @@ export function analyze(ast) {
     for (const raw of ids) {
       const path = resolve(raw, lists);
       if (!path) continue;
-      const info = ensure(path);
+      const info = ensure(path, node);
       info.usedIn.push({ line: node.line, col: node.col, context });
       info.contexts.add(context);
       for (const c of conds) if (!info.gatedBy.includes(c)) info.gatedBy.push(c);
@@ -263,7 +269,7 @@ export function analyze(ast) {
           noteUse(n.expr, n, 'list', lists, conds, { list: true, listPath: base });
           const prefix = (base || n.src) + '[]';
           structure.push({ type: 'list', line: n.line, col: n.col, endLine: n.endLine, src: n.src, path: base });
-          if (base) { const li = ensure(base); setType(li, 'list', 10); }
+          if (base) { const li = ensure(base, n); setType(li, 'list', 10); }
           walkBody(n.body, [...lists, { prefix, itemName: n.itemName }], conds);
           break;
         }
@@ -404,8 +410,9 @@ export function collectAnnotations(ast, variables) {
               setPos(); target[ANNOTATION_FIELD[a.key]] = num; break;
             }
             case 'pattern':
-              try { new RegExp(a.value); setPos(); target.pattern = a.value; }
-              catch (e) { annotationErrors.push({ message: `@pattern ${path}: invalid regular expression: ${e.message}`, ...pos, severity: 'error' }); }
+              { const problem = patternProblem(a.value);
+                if (problem) annotationErrors.push({ message: `@pattern ${path}: ${problem}`, ...pos, severity: 'error' });
+                else { setPos(); target.pattern = a.value; } }
               break;
             case 'validate': {
               const idx = messageSeparator(a.value);
@@ -470,6 +477,84 @@ function walkExpr(n, fn) {
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 /** A property name that is safe to read/write on plain data objects. */
 export function isSafeKey(key) { return !UNSAFE_KEYS.has(String(key).toLowerCase()); }
+
+// ---------- user regular expressions (`@pattern`) ----------
+// A pattern is user input that runs against user input in the browser tab: keep it small, refuse the classic
+// catastrophic-backtracking shape (a quantified group whose body is itself quantified: `(a+)+`, `(\d*)*`,
+// `(x+){2,}`), and only ever test a bounded slice of the value. Compiled RegExps are memoised.
+export const MAX_PATTERN_LENGTH = 256;
+export const MAX_PATTERN_INPUT = 4096;
+const patternCache = new Map();
+
+/**
+ * The offending `(…)+` when a quantified group can end in a quantified atom (`(a+)+`, `(\d*)*`, `(x+){2,}`,
+ * `((ab)+)*`) or repeats an alternation with quantifiers inside (`(a+|b)*`): the classic catastrophic-backtracking
+ * shapes. A group whose last atom is fixed (`(\d+\.)*`, `(-\d{4})?`, `(\d{1,3}\.){3}`) is fine. Null when clean.
+ */
+function nestedQuantifier(src) {
+  const quantAt = (i) => { const c = src[i]; return c === '*' || c === '+' || (c === '{' && /^\{\d+(,\d*)\}/.test(src.slice(i))); };
+  const frames = [{ at: -1, lastQ: false, anyQ: false, alt: false }];
+  let inClass = false;
+  const top = () => frames[frames.length - 1];
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (inClass) { if (c === ']') { inClass = false; top().lastQ = false; } else if (c === '\\') i++; continue; }
+    if (c === '\\') { i++; top().lastQ = false; continue; }
+    if (c === '[') { inClass = true; continue; }
+    if (c === '(') { frames.push({ at: i, lastQ: false, anyQ: false, alt: false }); continue; }
+    if (c === ')') {
+      if (frames.length === 1) return null; // unbalanced: RegExp reports it
+      const g = frames.pop();
+      const risky = g.lastQ || (g.alt && g.anyQ);
+      const q = quantAt(i + 1);
+      if (q && risky) { const m = /^[*+]|^\{\d+(,\d*)?\}/.exec(src.slice(i + 1)); return src.slice(g.at, i + 1 + m[0].length); }
+      const parent = top();
+      parent.anyQ = parent.anyQ || g.anyQ || q;
+      parent.lastQ = q; // a quantified group is itself a repeated last atom
+      continue;
+    }
+    if (c === '|') { top().alt = true; top().lastQ = false; continue; }
+    if (c === '*' || c === '+' || c === '?' || (c === '{' && /^\{\d+(,\d*)?\}/.test(src.slice(i)))) {
+      if (c === '{') { i = src.indexOf('}', i); }
+      // `?` after a quantifier is the lazy flag, not a new quantifier; `{n}` is fixed and repeats nothing unboundedly
+      const fixed = c === '{' && !src.slice(0, i + 1).match(/\{\d+,\d*\}$/);
+      if (!fixed) { top().lastQ = true; top().anyQ = true; }
+      continue;
+    }
+    top().lastQ = false;
+  }
+  return null;
+}
+
+/**
+ * Why a `@pattern` source is not acceptable, or null when it is fine.
+ * @param {string} pattern
+ * @returns {string|null}
+ */
+export function patternProblem(pattern) {
+  const src = String(pattern);
+  if (src.length > MAX_PATTERN_LENGTH) return `pattern is longer than ${MAX_PATTERN_LENGTH} characters`;
+  const nested = nestedQuantifier(src);
+  if (nested) return `pattern has nested quantifiers (${nested}) and could hang on long input`;
+  try { new RegExp(src); } catch (e) { return `invalid regular expression: ${e.message}`; }
+  return null;
+}
+
+/**
+ * Memoised RegExp for a checked pattern, or an Error describing the problem.
+ * @param {string} pattern
+ * @returns {RegExp|Error}
+ */
+export function compilePattern(pattern) {
+  const src = String(pattern);
+  let hit = patternCache.get(src);
+  if (hit) return hit;
+  const problem = patternProblem(src);
+  hit = problem ? new Error(problem) : new RegExp(src);
+  if (patternCache.size >= 512) patternCache.delete(patternCache.keys().next().value);
+  patternCache.set(src, hit);
+  return hit;
+}
 
 const isBlankValue = (v) => v === undefined || v === null || v === '' || (typeof v === 'number' && Number.isNaN(v)) || isEmptyObject(v);
 

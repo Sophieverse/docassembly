@@ -17,8 +17,9 @@ test('runsToInline: a placeholder split across differently formatted runs comes 
 test('runsToInline: the field keeps the formatting of the run it starts in; formatting resumes after it', () => {
   assert.equal(runsToInline([{ text: '{[Client.FullName]}', bold: true }]), '**{[Client.FullName]}**');
   assert.equal(runsToInline([{ text: 'I, ' }, { text: '{[Client.FullName]}', bold: true }, { text: ', declare' }]), 'I, **{[Client.FullName]}**, declare');
-  // bold opens mid-field and continues after: no marker inside the field, bold starts after it
-  assert.equal(runsToInline([{ text: '{[X' }, { text: ']} rest', bold: true }]), '{[X]}** rest**');
+  // bold opens mid-field and continues after: no marker inside the field, bold starts after it (and after the
+  // space, so the marker is not read back as a literal asterisk — review round 2, finding 1)
+  assert.equal(runsToInline([{ text: '{[X' }, { text: ']} rest', bold: true }]), '{[X]} **rest**');
   // bold that covers the start of the field and ends inside it: field is bold, close after it
   assert.equal(runsToInline([{ text: 'a {[X', bold: true }, { text: ']} b' }]), '**a {[X]}** b');
   // an unterminated field runs to the end of the paragraph, raw

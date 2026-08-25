@@ -4,6 +4,7 @@
 //        uses CompressionStream('deflate-raw') when available, else falls back to STORE
 //      crc32(bytes: Uint8Array): number   (unsigned)
 //      entries: Array<{name: string, data: Uint8Array|string, date?: Date}>
+//             | {name, raw: Uint8Array, method, crc, compressedSize, uncompressedSize}  (precompressed pass-through)
 
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);
@@ -77,6 +78,14 @@ function prepare(entries) {
   const enc = new TextEncoder();
   const now = new Date();
   return entries.map((e) => {
+    if (e.data === undefined && e.raw instanceof Uint8Array) {
+      // precompressed: copy the stored bytes and the original method/crc/sizes verbatim (never inflated)
+      if (e.compressedSize !== undefined && e.compressedSize !== e.raw.length) throw new Error(`zipwrite: ${e.name}: raw length ${e.raw.length} != compressedSize ${e.compressedSize}`);
+      const method = e.method || 0;
+      const rawSize = method === 0 ? e.raw.length : e.uncompressedSize;
+      if (rawSize === undefined || e.crc === undefined) throw new Error(`zipwrite: ${e.name}: precompressed entries need crc and uncompressedSize`);
+      return { nameBytes: enc.encode(e.name), raw: null, rawSize, data: e.raw, method, crc: e.crc >>> 0, precompressed: true, ...dosDateTime(e.date || now) };
+    }
     const raw = typeof e.data === 'string' ? enc.encode(e.data) : e.data;
     return { nameBytes: enc.encode(e.name), raw, rawSize: raw.length, data: raw, method: 0, crc: crc32(raw), ...dosDateTime(e.date || now) };
   });
@@ -115,6 +124,7 @@ export async function writeZipAsync(entries, { compress = true } = {}) {
   const prepared = prepare(entries);
   if (compress && canDeflate()) {
     for (const e of prepared) {
+      if (e.precompressed) continue;
       const d = await deflateRaw(e.raw);
       if (d.length < e.raw.length) { e.data = d; e.method = 8; }
     }

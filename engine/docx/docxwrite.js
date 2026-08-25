@@ -16,7 +16,9 @@ import { writeZip, writeZipAsync } from './zipwrite.js';
 export function escapeXml(s) {
   return String(s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g, '')
+    // a lone surrogate is not a character: Word refuses the XML. Replace with U+FFFD.
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
 }
 
 const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';

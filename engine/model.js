@@ -7,9 +7,12 @@
  * object, list, computed (has `formula`). Also accepted: email, phone.
  */
 
-import { parseExpr, evalExpr, collectIdentifiers, createTrace, createScope } from './expr.js';
+import { parseExpr, evalExpr, collectIdentifiers, createTrace, createScope, truthy } from './expr.js';
 import { parseDate, toISODate } from './functions.js';
-import { humanize, getPath, isSafeKey } from './analyze.js';
+import { humanize, getPath, isSafeKey, compilePattern, MAX_PATTERN_INPUT } from './analyze.js';
+
+/** Plain option values of a definition whose `options` may hold strings or `{value, label}` objects. */
+const optionValues = (options) => (options || []).map((o) => (o && typeof o === 'object' ? o.value : o));
 import { itemVars } from './evaluate.js';
 
 export { humanize };
@@ -158,7 +161,7 @@ export function applyAnnotations(model, annotations, errors) {
       const raw = ann.default;
       const t = def.type;
       let v, bad = null;
-      if (t === 'multiselect') { v = raw.split(/\s*\|\s*/).filter(Boolean); if (def.options && def.options.length) { const miss = v.filter((x) => !def.options.includes(x)); if (miss.length) bad = `"${miss[0]}" is not one of the options`; } }
+      if (t === 'multiselect') { v = raw.split(/\s*\|\s*/).filter(Boolean); if (def.options && def.options.length) { const vals = optionValues(def.options).map((x) => String(x).toLowerCase()); const miss = v.filter((x) => !vals.includes(String(x).toLowerCase())); if (miss.length) bad = `"${miss[0]}" is not one of the options`; } }
       else if (t === 'list' || t === 'object' || t === 'computed') bad = `a ${t} variable cannot have a default`;
       else {
         v = coerce(raw, t);
@@ -303,7 +306,7 @@ export function coerce(value, type) {
       const cleaned = String(value).replace(/[$€£¥,\s]/g, '');
       const paren = /^\((.+)\)$/.exec(cleaned); // accountants' negative: (500)
       const n = Number(paren ? '-' + paren[1] : cleaned);
-      return Number.isNaN(n) ? value : n;
+      return Number.isFinite(n) ? n : value; // NaN and ±Infinity are not answers
     }
     case 'date': {
       if (value === '') return '';
@@ -408,9 +411,10 @@ function ruleErrors(def, value, scope) {
   if (def.minLength != null && def.minLength !== '' && len < Number(def.minLength)) fail(`must have at least ${def.minLength} ${unit}${Number(def.minLength) === 1 ? '' : 's'}`);
   if (def.maxLength != null && def.maxLength !== '' && len > Number(def.maxLength)) fail(`must have at most ${def.maxLength} ${unit}${Number(def.maxLength) === 1 ? '' : 's'}`);
   if (def.pattern) {
-    let re = null;
-    try { re = new RegExp(def.pattern); } catch { errs.push(`${label}: invalid pattern /${def.pattern}/`); }
-    if (re && !re.test(String(value))) fail(`must match pattern ${def.pattern}`);
+    // user regex on user input: checked (length / nested quantifiers), memoised, and run on a bounded slice
+    const re = compilePattern(def.pattern);
+    if (re instanceof Error) errs.push(`${label}: invalid pattern /${def.pattern}/`); // includes patterns refused as unsafe
+    else if (!re.test(String(value).slice(0, MAX_PATTERN_INPUT))) fail(`must match pattern ${def.pattern}`);
   }
   if (def.validate && String(def.validate).trim()) {
     const ast = compiledRule(String(def.validate).trim());
@@ -419,7 +423,7 @@ function ruleErrors(def, value, scope) {
       const sc = createScope({ value, this: value }, scope);
       try {
         const ok = evalExpr(ast, sc, createTrace());
-        if (!ok || ok === '' || (Array.isArray(ok) && !ok.length)) fail(`is not valid (rule: ${def.validate})`);
+        if (!truthy(ok)) fail(`is not valid (rule: ${def.validate})`); // same truthiness as {[if …]}
       } catch (e) { errs.push(`${label}: validation rule error: ${e.message}`); }
     }
   }
@@ -457,7 +461,7 @@ export function validate(model, data, options = {}) {
     const before = errors.length;
     switch (def.type) {
       case 'number': case 'currency':
-        if (typeof value !== 'number' && Number.isNaN(Number(String(value).replace(/[$,\s]/g, '')))) errors.push({ path, message: `${label} must be a number` });
+        if (!Number.isFinite(typeof value === 'number' ? value : Number(String(value).replace(/[$,\s]/g, '')))) errors.push({ path, message: `${label} must be a number` });
         break;
       case 'date':
         if (!parseDate(value)) errors.push({ path, message: `${label} must be a valid date` });
@@ -470,7 +474,7 @@ export function validate(model, data, options = {}) {
         break;
       case 'multiselect':
         if (!Array.isArray(value)) errors.push({ path, message: `${label} must be a list` });
-        else if (def.options && def.options.length) for (const v of value) if (!def.options.includes(v)) errors.push({ path, message: `${label}: "${v}" is not an option` });
+        else if (def.options && def.options.length) { const vals = optionValues(def.options).map((x) => String(x).toLowerCase()); for (const v of value) if (!vals.includes(String(v).toLowerCase())) errors.push({ path, message: `${label}: "${v}" is not an option` }); }
         break;
       case 'email':
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value))) errors.push({ path, message: `${label} must be an email address` });

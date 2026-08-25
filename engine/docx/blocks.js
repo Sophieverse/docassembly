@@ -247,19 +247,30 @@ export function runsToInline(runs) {
   const cur = { bold: false, italic: false, underline: false };
   const marker = { bold: '**', italic: '*', underline: '__' };
   let out = '';
+  let pending = ''; // trailing whitespace of the previous run, emitted after any closing markers
   const pieces = splitRunsAtFields((runs || []).filter((r) => r.text).map((r) => ({ ...r, text: r.text.replace(/\n/g, ' ') })));
   for (const r of pieces) {
     if (!r.text) continue;
     // A field takes the formatting of the run it starts in (so a bold `**{[Name]}**` survives). Formatting
     // changes *inside* a {[ ]} field are noise (Word split the placeholder across runs): emit the raw text
     // with no markers and no escapes, keeping whatever formatting state is open.
-    if (r.field === 'inside') { out += r.text; continue; }
+    if (r.field === 'inside') { out += pending + r.text; pending = ''; continue; }
+    // Whitespace at a run edge stays outside the markers: `Hello` + bold ` World` → `Hello **World**`, and
+    // bold `bold ` + italic `italic` → `**bold** *italic*` — never `Hello** World**`, which would read back
+    // as literal asterisks. An all-whitespace run changes no formatting.
+    let text = r.text, lead = '', tail = '';
+    if (!r.field) {
+      lead = /^\s*/.exec(text)[0]; text = text.slice(lead.length);
+      tail = /\s*$/.exec(text)[0]; text = text.slice(0, text.length - tail.length);
+    }
+    if (!text) { pending += lead; continue; }
     for (const f of ['underline', 'italic', 'bold']) if (cur[f] && !r[f]) { out += marker[f]; cur[f] = false; }
+    out += pending + lead; pending = tail;
     for (const f of ['bold', 'italic', 'underline']) if (!cur[f] && r[f]) { out += marker[f]; cur[f] = true; }
-    out += r.field ? r.text : escapeText(r.text);
+    out += r.field ? text : escapeText(text);
   }
   for (const f of ['underline', 'italic', 'bold']) if (cur[f]) out += marker[f];
-  return out;
+  return out + pending;
 }
 
 function escapeLineStart(s) {

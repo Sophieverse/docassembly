@@ -46,8 +46,10 @@ async function inflateRaw(compressed, maxSize = Infinity) {
  * @returns {Map<string, object>}
  */
 export const MAX_ENTRY_SIZE = 50 * 1024 * 1024; // refuse to inflate parts larger than this (zip bombs)
+export const MAX_PACKAGE_SIZE = 256 * 1024 * 1024; // …and the whole package inflated (many mid-sized bombs)
+export const MAX_ENTRIES = 4096; // a real .docx has a few dozen parts
 
-export function readZip(b, { maxEntrySize = MAX_ENTRY_SIZE } = {}) {
+export function readZip(b, { maxEntrySize = MAX_ENTRY_SIZE, maxPackageSize = Math.max(MAX_PACKAGE_SIZE, maxEntrySize), maxEntries = MAX_ENTRIES } = {}) {
   if (!(b instanceof Uint8Array)) throw new Error('zipread: expected a Uint8Array');
   if (b.length >= 8 && b[0] === 0xd0 && b[1] === 0xcf && b[2] === 0x11 && b[3] === 0xe0) {
     throw new Error('zipread: this is a legacy binary Word file (.doc / OLE compound document), not a .docx. Open it in Word and "Save As" .docx first.');
@@ -56,7 +58,9 @@ export function readZip(b, { maxEntrySize = MAX_ENTRY_SIZE } = {}) {
   const count = u16(b, eocd + 10);
   const cdOffset = u32(b, eocd + 16);
   if (cdOffset >= eocd) throw new Error('zipread: central directory offset out of range');
+  if (count > maxEntries) throw new Error(`zipread: too many entries (${count}, limit ${maxEntries})`);
   const entries = new Map();
+  let total = 0;
   let p = cdOffset;
   for (let i = 0; i < count; i++) {
     if (p + 46 > b.length || u32(b, p) !== 0x02014b50) throw new Error('zipread: bad central directory signature at ' + p);
@@ -78,9 +82,13 @@ export function readZip(b, { maxEntrySize = MAX_ENTRY_SIZE } = {}) {
     const dataOffset = localOffset + 30 + lNameLen + lExtraLen;
     if (dataOffset + compressedSize > b.length) throw new Error('zipread: entry data past end of file: ' + name);
     if (uncompressedSize > maxEntrySize) throw new Error(`zipread: entry ${name} too large (${uncompressedSize} bytes)`);
+    total += uncompressedSize;
+    if (total > maxPackageSize) throw new Error(`zipread: package too large when unpacked (over ${maxPackageSize} bytes)`);
 
     const entry = {
       name, method, crc, compressedSize, uncompressedSize, dataOffset,
+      /** The entry's stored (still compressed) bytes, for passing through to a writer without inflating. */
+      raw() { return b.subarray(dataOffset, dataOffset + compressedSize); },
       async bytes() {
         const raw = b.subarray(dataOffset, dataOffset + compressedSize);
         if (method === 0) return raw;

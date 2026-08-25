@@ -755,16 +755,20 @@ export async function fillDocx(bytes, data, options = {}) {
   const warnings = [];
   const entries = [];
   for (const [name, entry] of zip) {
-    let data_ = await entry.bytes();
+    // Only template parts are inflated; everything else (images, fonts, embedded files) passes through as the
+    // stored bytes, so a 300 KB package that inflates to hundreds of MB never does, and a 2 MB photo is copied,
+    // not re-encoded.
     if (TEMPLATE_PART.test(name)) {
+      const data_ = await entry.bytes();
       const xml = dec.decode(data_);
       if (hasTagText(xml)) {
         const r = fillPartXml(xml, data, options, partLabel(name));
         for (const w of r.warnings) if (!warnings.includes(w)) warnings.push(w);
-        data_ = enc.encode(r.xml);
+        entries.push({ name, data: enc.encode(r.xml) });
+        continue;
       }
     }
-    entries.push({ name, data: data_ });
+    entries.push({ name, raw: entry.raw(), method: entry.method, crc: entry.crc, compressedSize: entry.compressedSize, uncompressedSize: entry.uncompressedSize });
   }
   const ct = entries.findIndex((e) => e.name === '[Content_Types].xml');
   if (ct > 0) entries.unshift(...entries.splice(ct, 1));
