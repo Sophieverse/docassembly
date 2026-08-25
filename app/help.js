@@ -49,10 +49,12 @@ The Client is single.
 <tr><td>currency</td><td><code>{[Fee|currency]}</code></td><td>$2,500.00</td></tr>
 <tr><td>number</td><td><code>{[Qty|number]}</code></td><td>1,250</td></tr>
 <tr><td>words</td><td><code>{[Fee|words]}</code></td><td>two thousand five hundred</td></tr>
+<tr><td>dollars / dollarsFull</td><td><code>{[Fee|dollars]}</code></td><td>Two Thousand Five Hundred and 00/100 Dollars · <code>dollarsFull</code> → Two Thousand Five Hundred Dollars ($2,500.00)</td></tr>
 <tr><td>ordinal / ordinalwords</td><td><code>{[Day|ordinal]}</code></td><td>3rd / third</td></tr>
-<tr><td>format:"…"</td><td><code>{[Date|format:"long"]}</code></td><td>January 5, 2026 (also <code>short</code>, or tokens <code>MMMM d, yyyy</code>)</td></tr>
+<tr><td>format:"…"</td><td><code>{[Date|format:"long"]}</code></td><td>January 5, 2026 (also <code>short</code>, <code>legal</code> → the 5th day of January, 2026, or tokens <code>MMMM D, YYYY</code>, <code>Do [day of] MMMM YYYY</code>; numbers: <code>format:"0,0.00"</code>; Yes/No: <code>format:"is":"is not"</code>)</td></tr>
 <tr><td>default:"…"</td><td><code>{[Title|default:"Agreement"]}</code></td><td>Fallback when empty (0 is not empty — use <code>{[if Rent &gt; 0]}</code> for numbers)</td></tr>
 <tr><td>pluralize:"a","b"</td><td><code>{[count(Children)|pluralize:"child","children"]}</code></td><td>1 child / 3 children (add <code>,true</code> to omit the number)</td></tr>
+<tr><td>punc:"1, 2, and 3"</td><td><code>{[list Children|punc:"1, 2, and 3"]}{[Name]}{[end list]}</code></td><td>Maya, Leo, and Ann — separators inserted automatically (write the example with "or", ";", or a trailing "." to change them)</td></tr>
 <tr><td>join:"and"</td><td><code>{[Parties|join:"and"]}</code></td><td>A, B, and C</td></tr>
 <tr><td>possessive</td><td><code>{[Name|possessive]}</code></td><td>James' / Mary's</td></tr>
 <tr><td>article</td><td><code>{[EntityType|article]} {[EntityType]}</code></td><td>an Oregon LLC / a Delaware corporation</td></tr>
