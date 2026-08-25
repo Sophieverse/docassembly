@@ -37,7 +37,7 @@ import { normalizeSmartQuotes } from '../lexer.js';
 const TEMPLATE_PART = /^word\/(document|header\d*|footer\d*|footnotes|endnotes|comments)\.xml$/;
 const RUN_CONTAINERS = new Set(['w:hyperlink', 'w:smartTag', 'w:ins', 'w:moveTo', 'w:fldSimple', 'w:customXml', 'w:dir', 'w:bdo']);
 const BLOCK_CONTAINERS = new Set(['w:body', 'w:tc', 'w:txbxContent', 'w:hdr', 'w:ftr', 'w:footnote', 'w:endnote', 'w:comment', 'w:sdtContent', 'w:customXml']);
-const NEEDS_PARA = new Set(['w:body', 'w:tc', 'w:txbxContent', 'w:hdr', 'w:ftr', 'w:footnote', 'w:endnote', 'w:comment']);
+const NEEDS_PARA = new Set(['w:body', 'w:tc', 'w:txbxContent', 'w:hdr', 'w:ftr', 'w:footnote', 'w:endnote', 'w:comment', 'w:sdtContent']);
 const INVISIBLE = new Set(['w:proofErr', 'w:bookmarkStart', 'w:bookmarkEnd', 'w:commentRangeStart', 'w:commentRangeEnd', 'w:permStart', 'w:permEnd', 'w:moveFromRangeStart', 'w:moveFromRangeEnd', 'w:moveToRangeStart', 'w:moveToRangeEnd', 'w:del', 'w:moveFrom']);
 const OPENERS = new Set(['if', 'list']);
 const CLOSERS = { if: new Set(['endif', 'end']), list: new Set(['endlist', 'end']) };
@@ -288,11 +288,11 @@ class Part {
   invisible(a) {
     if (a.kind === 'tag') return true;
     if (a.kind === 'raw') return INVISIBLE.has(a.node.name) || (a.node.name[0] === '#' && !this.raw(a.node).trim());
-    if (a.kind === 'run') return a.pieces.every((p) => p.kind === 't' && !p.text.trim());
+    if (a.kind === 'run') return a.pieces.every((p) => p.kind === 'tab' || (p.kind === 't' && !p.text.trim()));
     return false;
   }
   visibleAtom(a) {
-    if (a.kind === 'run') return a.pieces.some((p) => p.kind !== 't' || p.text.trim() !== '');
+    if (a.kind === 'run') return a.pieces.some((p) => p.kind === 'br' || p.kind === 'opaque' || (p.kind === 't' && p.text.trim() !== ''));
     if (a.kind === 'raw') return !this.invisible(a);
     return false;
   }
@@ -385,6 +385,7 @@ class Part {
     p._unit = unit;
     const pPr = p.children.find((c) => c.name === 'w:pPr');
     unit.pPr = pPr ? this.raw(pPr) : '';
+    unit.sectPr = !!pPr && pPr.children.some((c) => c.name === 'w:sectPr');
     const describe = () => `paragraph "${snippet(unit.text || this.textOf(p))}"`;
     const { atoms, tags, text } = this.consolidate(this.collectAtoms(p, [], []), describe);
     unit.text = text;
@@ -492,7 +493,12 @@ class Part {
     if (cont.seq) return;
     const items = [];
     for (const u of cont.units) {
-      if (u.kind === 'para' && u.isMarker) { for (const t of u.tags) if (!t.consumed) items.push(Object.assign(this.tagItem(t), { tag: t, item: u })); continue; }
+      if (u.kind === 'para' && u.isMarker) {
+        // A section break lives on the marker paragraph: keep it (emptied) exactly once, whatever the block does.
+        if (u.sectPr) (cont.sectUnits || (cont.sectUnits = [])).push(u);
+        for (const t of u.tags) if (!t.consumed) items.push(Object.assign(this.tagItem(t), { tag: t, item: u }));
+        continue;
+      }
       if (u.kind === 'table') this.finishTable(u);
       items.push({ type: 'content', item: u });
     }
@@ -507,14 +513,23 @@ class Part {
 
   evalContainer(cont, scope) {
     this.finishContainer(cont);
-    const out = [];
+    const out = [], units = [];
     this.evalSeq(cont.seq, scope, (u, sc) => {
       let x;
       if (u.kind === 'para') x = this.evalPara(u, sc);
       else if (u.kind === 'table') x = this.evalTable(u, sc);
       else x = this.rebuild(u.node, sc);
-      if (x != null) out.push(x);
+      if (x != null) { out.push(x); units.push(u); }
     });
+    if (cont.sectUnits) {
+      for (const su of cont.sectUnits) {
+        const idx = cont.units.indexOf(su);
+        let at = 0;
+        for (let i = units.length - 1; i >= 0; i--) if (cont.units.indexOf(units[i]) < idx) { at = i + 1; break; }
+        out.splice(at, 0, this.open(su.node) + su.pPr + this.close(su.node));
+        units.splice(at, 0, su);
+      }
+    }
     if (NEEDS_PARA.has(cont.node.name)) {
       let last = -1;
       for (let i = out.length - 1; i >= 0; i--) if (/^<w:(p|tbl)[\s>/]/.test(out[i])) { last = i; break; }
