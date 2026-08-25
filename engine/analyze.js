@@ -273,7 +273,7 @@ export function analyze(ast) {
   };
   walkBody(ast.body, [], []);
 
-  const { annotations, annotationErrors } = collectAnnotations(ast);
+  const { annotations, annotationErrors } = collectAnnotations(ast, variables);
 
   const nameForcesBoolean = (v) => /^(Is|Has|Can|Should|Will|Does|Did|Wants|Needs|Includes?)[A-Z_]/.test(v.name) || /^(is|has)$/i.test(v.name);
   for (const v of variables.values()) {
@@ -314,73 +314,130 @@ const ANNOTATION_FIELD = { minlength: 'minLength', maxlength: 'maxLength' };
 
 /**
  * Parse one `@key Path: value` line. Returns null when the line is not an annotation.
+ * A concrete index in the path (`Children[0].Name`) is normalised to the generic form (`Children[].Name`).
  * @param {string} line
  * @returns {{key:string, path:string, value:string}|{error:string}|null}
  */
 export function parseAnnotationLine(line) {
-  const m = /^@([A-Za-z]+)\s+([\p{L}_$][\p{L}\p{N}_$]*(?:\[\]|\.[\p{L}_$][\p{L}\p{N}_$]*)*)\s*(?::\s*(.*))?$/su.exec(line.trim());
+  const m = /^@([A-Za-z]+)\s+([\p{L}_$][\p{L}\p{N}_$]*(?:\[\d*\]|\.[\p{L}_$][\p{L}\p{N}_$]*)*)\s*(?::\s*(.*))?$/su.exec(line.trim());
   if (!m) return /^@[A-Za-z]+\b/.test(line.trim()) ? { error: `Cannot read annotation "${line.trim()}" (expected @key Path: value)` } : null;
   const key = m[1].toLowerCase();
   if (!ANNOTATION_KEYS.includes(key)) return { error: `Unknown annotation @${m[1]} (known: ${ANNOTATION_KEYS.map((k) => '@' + k).join(', ')})` };
-  return { key, path: m[2], value: (m[3] || '').trim() };
+  return { key, path: m[2].replace(/\[\d+\]/g, '[]'), value: (m[3] || '').trim() };
 }
+
+/** Strip one pair of matching surrounding quotes: `"Client's name"` → `Client's name`. */
+const unquote = (s) => (/^"[^"]*"$/.test(s) || /^'[^']*'$/.test(s) ? s.slice(1, -1) : s);
+/** Index of the first `::` outside string literals (the message may itself contain `::`), or -1. */
+function messageSeparator(src) {
+  let q = null;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (q) { if (c === q) q = null; continue; }
+    if (c === '"' || c === "'") q = c;
+    else if (c === ':' && src[i + 1] === ':') return i;
+  }
+  return -1;
+}
+const ANNOTATION_TYPES = ['text', 'longtext', 'number', 'currency', 'date', 'boolean', 'selection', 'multiselect', 'object', 'list', 'computed', 'email', 'phone'];
 
 /**
  * Collect `@` annotations from every comment in the AST. One annotation per line;
  * a comment may hold several. Values are typed: numbers for @min/@max (ISO dates stay strings),
  * arrays for @options, `{expr, message}` for @validate, booleans for @required/@optional.
+ *
+ * - Inside a list body a bare path names the item field when the list has it: `{[list Children]}{[# @label DOB: …]}`
+ *   annotates `Children[].DOB` (given `variables`; without them, any bare path inside a list body is prefixed).
+ * - The same key twice for one path: the last wins and a warning points at the overridden line.
+ * - With `variables`, an annotation for a path the template never uses is a warning (the variable is *not*
+ *   created — except by `@formula` / `@type … computed`, which define computed variables).
+ * - Each entry of `annotationErrors` carries `severity: 'error' | 'warning'`; positions of each key are kept on a
+ *   non-enumerable `__pos` property of the annotation object so model-level checks can point at a line.
  * @param {Object} ast
- * @returns {{annotations: Map<string, Object>, annotationErrors: Array<{message:string,line:number,col:number}>}}
+ * @param {Map<string, Object>} [variables] from analyze(), for path resolution and unused-variable warnings
+ * @returns {{annotations: Map<string, Object>, annotationErrors: Array<{message:string,line:number,col:number,severity:string}>}}
  */
-export function collectAnnotations(ast) {
+export function collectAnnotations(ast, variables) {
   const annotations = new Map();
   const annotationErrors = [];
-  const ensure = (path) => { if (!annotations.has(path)) annotations.set(path, {}); return annotations.get(path); };
-  const visit = (nodes) => {
+  const ensure = (path) => {
+    if (!annotations.has(path)) { const o = {}; Object.defineProperty(o, '__pos', { value: {}, enumerable: false }); annotations.set(path, o); }
+    return annotations.get(path);
+  };
+  const resolvePath = (path, lists) => {
+    if (!lists.length) return path;
+    const root = path.split('.')[0].replace(/\[\]$/, '');
+    for (let i = lists.length - 1; i >= 0; i--) {
+      const L = lists[i];
+      if (L.itemName && root === L.itemName) return path.includes('.') ? L.prefix + '.' + path.slice(path.indexOf('.') + 1) : L.prefix.slice(0, -2);
+      const cand = L.prefix + '.' + path;
+      if (!variables) return cand;
+      if (variables.has(cand) && !variables.has(path)) return cand;
+    }
+    return path;
+  };
+  const visit = (nodes, lists) => {
     for (const n of nodes) {
       if (n.type === 'comment') {
         const lines = String(n.value || '').split(/\r?\n/);
         lines.forEach((line, i) => {
           const a = parseAnnotationLine(line);
           if (!a) return;
-          if (a.error) { annotationErrors.push({ message: a.error, line: n.line + i, col: n.col }); return; }
-          const target = ensure(a.path);
+          const pos = { line: n.line + i, col: n.col };
+          if (a.error) { annotationErrors.push({ message: a.error, ...pos, severity: 'error' }); return; }
+          const path = resolvePath(a.path, lists);
+          const target = ensure(path);
+          const field = ANNOTATION_FIELD[a.key] || (a.key === 'optional' ? 'required' : a.key);
+          const setPos = (f = field) => {
+            const prev = target.__pos[f];
+            if (prev && target[f] !== undefined) annotationErrors.push({ message: `@${a.key} ${path}: overrides the @${prev.key} on line ${prev.line} (last one wins)`, ...pos, severity: 'warning' });
+            target.__pos[f] = { ...pos, key: a.key };
+          };
           switch (a.key) {
-            case 'required': target.required = a.value === '' ? true : !/^(false|no|0|off)$/i.test(a.value); break;
-            case 'optional': target.required = false; break;
-            case 'options': target.options = a.value.split('|').map((s) => s.trim()).filter(Boolean); break;
-            case 'min': case 'max': target[a.key] = /^-?\d+(\.\d+)?$/.test(a.value) ? Number(a.value) : a.value; break;
+            case 'required': setPos(); target.required = a.value === '' ? true : !/^(false|no|0|off)$/i.test(a.value); break;
+            case 'optional': setPos(); target.required = false; break;
+            case 'options': setPos(); target.options = a.value.split('|').map((s) => unquote(s.trim())).filter(Boolean); break;
+            case 'min': case 'max': setPos(); target[a.key] = /^-?\d+(\.\d+)?$/.test(a.value) ? Number(a.value) : a.value; break;
             case 'minlength': case 'maxlength': {
               const num = Number(a.value);
-              if (!Number.isInteger(num) || num < 0) { annotationErrors.push({ message: `@${ANNOTATION_FIELD[a.key]} ${a.path}: expected a whole number, got "${a.value}"`, line: n.line + i, col: n.col }); break; }
-              target[ANNOTATION_FIELD[a.key]] = num; break;
+              if (!Number.isInteger(num) || num < 0) { annotationErrors.push({ message: `@${ANNOTATION_FIELD[a.key]} ${path}: expected a whole number, got "${a.value}"`, ...pos, severity: 'error' }); break; }
+              setPos(); target[ANNOTATION_FIELD[a.key]] = num; break;
             }
             case 'pattern':
-              try { new RegExp(a.value); target.pattern = a.value; }
-              catch (e) { annotationErrors.push({ message: `@pattern ${a.path}: invalid regular expression: ${e.message}`, line: n.line + i, col: n.col }); }
+              try { new RegExp(a.value); setPos(); target.pattern = a.value; }
+              catch (e) { annotationErrors.push({ message: `@pattern ${path}: invalid regular expression: ${e.message}`, ...pos, severity: 'error' }); }
               break;
             case 'validate': {
-              const idx = a.value.indexOf('::');
-              target.validate = (idx === -1 ? a.value : a.value.slice(0, idx)).trim();
-              if (idx !== -1) target.message = a.value.slice(idx + 2).trim();
-              if (!target.validate) annotationErrors.push({ message: `@validate ${a.path}: missing expression`, line: n.line + i, col: n.col });
+              const idx = messageSeparator(a.value);
+              const expr = (idx === -1 ? a.value : a.value.slice(0, idx)).trim();
+              if (!expr) { annotationErrors.push({ message: `@validate ${path}: missing expression`, ...pos, severity: 'error' }); break; }
+              setPos(); target.validate = expr;
+              if (idx !== -1) { setPos('message'); target.message = unquote(a.value.slice(idx + 2).trim()); }
               break;
             }
             case 'type': {
               const t = a.value.toLowerCase();
-              if (!['text', 'longtext', 'number', 'currency', 'date', 'boolean', 'selection', 'multiselect', 'object', 'list', 'computed', 'email', 'phone'].includes(t)) { annotationErrors.push({ message: `@type ${a.path}: unknown type "${a.value}"`, line: n.line + i, col: n.col }); break; }
-              target.type = t; break;
+              if (!ANNOTATION_TYPES.includes(t)) { annotationErrors.push({ message: `@type ${path}: unknown type "${a.value}"`, ...pos, severity: 'error' }); break; }
+              setPos(); target.type = t; break;
             }
-            case 'formula': target.formula = a.value; target.type = 'computed'; break;
-            default: target[a.key] = a.value; break; // label, help, default, message
+            case 'formula': setPos(); target.formula = a.value; if (target.type === undefined) target.type = 'computed'; target.__pos.type = target.__pos.type || { ...pos, key: 'formula' }; break;
+            default: setPos(); target[a.key] = unquote(a.value); break; // label, help, default, message
           }
         });
       }
-      if (n.type === 'if') { for (const b of n.branches) visit(b.body); if (n.elseBody) visit(n.elseBody); }
-      if (n.type === 'list') visit(n.body);
+      if (n.type === 'if') { for (const b of n.branches) visit(b.body, lists); if (n.elseBody) visit(n.elseBody, lists); }
+      if (n.type === 'list') { const id = listIdentity(n.expr); visit(n.body, [...lists, { prefix: resolvePath(id || n.src, lists) + '[]', itemName: n.itemName }]); }
     }
   };
-  visit(ast.body || []);
+  visit(ast.body || [], []);
+  if (variables) {
+    for (const [path, ann] of annotations) {
+      if (variables.has(path) || ann.formula !== undefined || ann.type === 'computed') continue;
+      const first = Object.values(ann.__pos).sort((x, y) => x.line - y.line)[0] || { line: 0, col: 0, key: Object.keys(ann)[0] };
+      annotationErrors.push({ message: `@${first.key} ${path}: the template does not use "${path}" (annotation ignored)`, line: first.line, col: first.col, severity: 'warning' });
+    }
+  }
+  annotationErrors.sort((x, y) => x.line - y.line);
   return { annotations, annotationErrors };
 }
 

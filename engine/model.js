@@ -86,7 +86,8 @@ export function createModel(analysis) {
     model.variables[path] = defFromInfo(info);
     model.order.push(path);
   }
-  applyAnnotations(model, analysis.annotations);
+  model.annotationErrors = [];
+  applyAnnotations(model, analysis.annotations, model.annotationErrors);
   return model;
 }
 
@@ -111,13 +112,31 @@ function segmentsOf(path) {
  * Apply template annotations (from analyze().annotations) onto a model in place.
  * Every applied field is recorded in `def.fromTemplate[field]`. A `@formula` for a path the
  * template never prints creates a computed variable.
+ * Type-aware problems (a `@default` that is not a valid value of the variable's type, `@type object` on a printed
+ * leaf) are reported into `errors` (also `model.annotationErrors`) as `{ path, message, line, col, severity }`; the
+ * offending field is left unset.
  * @param {Model} model
  * @param {Map<string, Object>} [annotations]
+ * @param {Array} [errors] receives `{ path, message, line, col, severity }` entries
  */
-export function applyAnnotations(model, annotations) {
+export function applyAnnotations(model, annotations, errors) {
   if (!annotations) return model;
-  for (const [path, ann] of annotations) {
+  const report = (path, ann, field, message, severity = 'error') => {
+    const pos = (ann.__pos && ann.__pos[field]) || {};
+    const entry = { path, message, line: pos.line, col: pos.col, severity };
+    if (errors) errors.push(entry);
+    if (!model.annotationErrors) model.annotationErrors = [];
+    if (model.annotationErrors !== errors) model.annotationErrors.push(entry);
+  };
+  const hasChildren = (path, sep) => Object.keys(model.variables).some((p) => p.startsWith(path + sep));
+  for (const [path, ann0] of annotations) {
+    let ann = ann0;
     let def = model.variables[path];
+    // A leaf that is printed cannot be a container; a list with no item fields is a list of plain values.
+    if (ann.type === 'object' && !hasChildren(path, '.')) {
+      report(path, ann, 'type', `@type ${path}: object needs child variables (${path}.Something) in the template; ignored`);
+      ann = { ...ann }; Object.defineProperty(ann, '__pos', { value: ann0.__pos || {}, enumerable: false }); delete ann.type;
+    }
     if (!def) {
       if (!ann.formula && ann.type !== 'computed') continue; // annotation for a variable the template does not use
       const sg = segmentsOf(path);
@@ -127,7 +146,7 @@ export function applyAnnotations(model, annotations) {
     }
     def.fromTemplate = {};
     // type first so option/default handling can see it
-    if (ann.type) { def.type = ann.type; def.fromTemplate.type = ann.type; }
+    if (ann.type) { def.type = ann.type; def.fromTemplate.type = ann.type; if (ann.type === 'list' && !hasChildren(path, '[].') && !def.itemType) def.itemType = 'text'; }
     if (ann.options) { def.options = [...ann.options]; def.fromTemplate.options = [...ann.options]; if (!ann.type && !['selection', 'multiselect'].includes(def.type)) { def.type = 'selection'; def.fromTemplate.type = 'selection'; } }
     if (ann.formula !== undefined) { def.formula = ann.formula; def.fromTemplate.formula = ann.formula; if (def.type !== 'computed') { def.type = 'computed'; def.fromTemplate.type = 'computed'; } }
     if (ann.required !== undefined) { def.required = ann.required; def.fromTemplate.required = ann.required; }
@@ -137,8 +156,19 @@ export function applyAnnotations(model, annotations) {
     }
     if (ann.default !== undefined) {
       const raw = ann.default;
-      const v = def.type === 'multiselect' ? raw.split(/\s*\|\s*/).filter(Boolean) : coerce(raw, def.type);
-      def.default = v; def.fromTemplate.default = v;
+      const t = def.type;
+      let v, bad = null;
+      if (t === 'multiselect') { v = raw.split(/\s*\|\s*/).filter(Boolean); if (def.options && def.options.length) { const miss = v.filter((x) => !def.options.includes(x)); if (miss.length) bad = `"${miss[0]}" is not one of the options`; } }
+      else if (t === 'list' || t === 'object' || t === 'computed') bad = `a ${t} variable cannot have a default`;
+      else {
+        v = coerce(raw, t);
+        if (t === 'boolean' && typeof v !== 'boolean') bad = `expected yes/no or true/false, got "${raw}"`;
+        else if ((t === 'number' || t === 'currency') && typeof v !== 'number') bad = `expected a number, got "${raw}"`;
+        else if (t === 'date' && !/^\d{4}-\d{2}-\d{2}$/.test(String(v))) bad = /^today$/i.test(raw) ? `"today" is not supported (defaults are fixed values; use a computed variable with today())` : `expected a date, got "${raw}"`;
+        else if (t === 'selection' && def.options && def.options.length && !def.options.some((o) => String(typeof o === 'object' ? o.value : o).toLowerCase() === String(v).toLowerCase())) bad = `"${raw}" is not one of the options`;
+      }
+      if (bad) report(path, ann, 'default', `@default ${path}: ${bad}`);
+      else { def.default = v; def.fromTemplate.default = v; }
     }
   }
   return model;
@@ -200,7 +230,7 @@ function userChangedOptions(e, f) {
 export function mergeModel(existing, analysis) {
   const fresh = createModel({ variables: analysis.variables }); // inference only; annotations applied below
   const annotations = analysis.annotations || new Map();
-  const out = { variables: {}, order: [] };
+  const out = { variables: {}, order: [], annotationErrors: [] };
   const existingVars = (existing && existing.variables) || {};
   for (const path of fresh.order) {
     const f = fresh.variables[path];
@@ -239,6 +269,7 @@ export function mergeModel(existing, analysis) {
     if (!e) { filtered.set(path, ann); continue; }
     const f = fresh.variables[path] || e;
     const keep = {};
+    Object.defineProperty(keep, '__pos', { value: ann.__pos || {}, enumerable: false });
     for (const [k, v] of Object.entries(ann)) {
       const field = k === 'minlength' ? 'minLength' : k === 'maxlength' ? 'maxLength' : k;
       if (!isUserEdited(e, field, f)) keep[k] = v;
@@ -247,7 +278,7 @@ export function mergeModel(existing, analysis) {
     if (ann.options && !keep.options && !ann.type && !isUserEdited(e, 'type', f) && !['selection', 'multiselect'].includes(out.variables[path]?.type)) keep.type = 'selection';
     if (Object.keys(keep).length) filtered.set(path, keep);
   }
-  applyAnnotations(out, filtered);
+  applyAnnotations(out, filtered, out.annotationErrors);
   // A computed variable that came from a removed @formula annotation is orphaned, not kept.
   for (const path of out.order) {
     const d = out.variables[path];
@@ -392,7 +423,7 @@ function ruleErrors(def, value, scope) {
       } catch (e) { errs.push(`${label}: validation rule error: ${e.message}`); }
     }
   }
-  return errs;
+  return [...new Set(errs)]; // a `message` override reads once, however many rules fail
 }
 
 /**
@@ -418,6 +449,8 @@ export function validate(model, data, options = {}) {
     const label = def.label || path;
     if (isBlank(value)) {
       if (def.required) errors.push({ path, message: `${label} is required` });
+      // an empty list still has to meet a minimum item count ("at least one member")
+      else if (Array.isArray(value) && !options.requiredOnly && Number(def.minLength) > 0) errors.push({ path, message: def.message ? def.message : `${label} must have at least ${def.minLength} item${Number(def.minLength) === 1 ? '' : 's'}` });
       return;
     }
     if (options.requiredOnly) return; // only report missing required answers, not format problems
@@ -520,10 +553,16 @@ export function computeDerived(model, data) {
       const L = listOf(p);
       const d = new Set();
       for (const id of ids) {
+        // `Kids|filter: Age > Threshold` collects `Kids[].Threshold`; at runtime a bare name inside the filter falls
+        // through to the enclosing item / top level, so those candidates are dependencies too (over-approximation).
+        const cands = [id];
+        for (let i = id.lastIndexOf('[].'); i !== -1; i = id.lastIndexOf('[].', i - 1)) cands.push(id.slice(i + 3));
         for (const q of computed) {
-          if (q === p) continue;
-          if (q === id || q.startsWith(id + '[]') || q.startsWith(id + '.')) d.add(q);
-          else if (L && (q === `${L}[].${id}` || q.startsWith(`${L}[].${id}.`) || q.startsWith(`${L}[].${id}[]`))) d.add(q);
+          if (q === p) continue; // a self-reference reads the value already stored in the data, it is not a cycle
+          for (const c of cands) {
+            if (q === c || q.startsWith(c + '[]') || q.startsWith(c + '.')) d.add(q);
+            else if (L && (q === `${L}[].${c}` || q.startsWith(`${L}[].${c}.`) || q.startsWith(`${L}[].${c}[]`))) d.add(q);
+          }
         }
       }
       deps.set(p, [...d]);

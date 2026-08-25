@@ -170,7 +170,7 @@ test('several failing rules on one value each report; custom message replaces al
   const errs = validate(m, { Code: 'ab' });
   assert.equal(errs.length, 2);
   m.variables['Code'].message = 'Code must be 3+ capital letters';
-  assert.deepEqual(validate(m, { Code: 'ab' }).map((x) => x.message), ['Code must be 3+ capital letters', 'Code must be 3+ capital letters']);
+  assert.deepEqual(validate(m, { Code: 'ab' }).map((x) => x.message), ['Code must be 3+ capital letters']); // QA2: one message per field, not one per rule
   // custom message does not replace the required message
   assert.equal(validate(m, { Code: '' })[0].message, 'Code is required');
 });
